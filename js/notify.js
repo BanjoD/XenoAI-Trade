@@ -12,9 +12,10 @@ const Notify = (() => {
   const EVENTS = [
     ["ai_open", "ИИ открывает сделку", "вход автопилота или сделка, открытая по сигналу ИИ"],
     ["ai_close", "ИИ закрывает сделку", "цель, стоп или сигнал выхода — с профитом или минусом"],
+    ["ai_be", "ИИ перевёл в безубыток", "сделка дошла до +1R — стоп подтянут к входу, минус уже невозможен"],
     ["ai_flip", "ИИ переворачивает позицию", "флип: закрыл позицию и вошёл в обратную сторону"],
     ["threshold", "Авто-стоп сессии", "результат сессии достиг ±лимита — все ИИ-сделки закрыты"],
-    ["autopilot", "Автопилот вкл/выкл", "переключение режима ИИ-автопилота"],
+    ["autopilot", "Автопилот вкл/выкл", "переключение режима ИИ-автопилота и паузы после серии минусов"],
     ["signal", "Сигналы стратегий", "новые сигналы пяти стратегий сканера (частые)"],
     ["user_open", "Мои открытия", "демо-сделки, открытые вручную"],
     ["user_close", "Мои закрытия", "закрытие ваших сделок, включая стоп/цель"],
@@ -24,7 +25,7 @@ const Notify = (() => {
 
   const DEFAULTS = () => ({
     on: false,
-    events: { ai_open: true, ai_close: true, ai_flip: true, threshold: true, autopilot: true, signal: false, user_open: true, user_close: true, live_order: true, lab: false },
+    events: { ai_open: true, ai_close: true, ai_be: true, ai_flip: true, threshold: true, autopilot: true, signal: false, user_open: true, user_close: true, live_order: true, lab: false },
     minPnl: 0,      // присылать закрытия только если |профит| ≥ N ХРЮ (0 = все)
     sound: true,    // звук системного уведомления
     vibro: true,    // вибрация (Android)

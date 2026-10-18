@@ -143,7 +143,63 @@ const Ind = (() => {
     return vals.map((v, i) => (i >= n ? ((v - vals[i - n]) / vals[i - n]) * 100 : null));
   }
 
-  return { sma, emaSeries, bollinger, rsiSeries, macdSeries, atrSeries, ichimoku, highest, lowest, rocSeries };
+  // ADX (Wilder, 14): сила тренда 0..100 + направляющие DI+ / DI−
+  function adxSeries(bars, period) {
+    period = period || 14;
+    const n = bars.length;
+    const out = { adx: new Array(n).fill(null), pdi: new Array(n).fill(null), mdi: new Array(n).fill(null) };
+    if (n < period * 2) return out;
+    let trS = 0, pS = 0, mS = 0;
+    const dxArr = [];
+    for (let i = 1; i < n; i++) {
+      const up = bars[i].h - bars[i - 1].h;
+      const dn = bars[i - 1].l - bars[i].l;
+      const pdm = up > dn && up > 0 ? up : 0;
+      const mdm = dn > up && dn > 0 ? dn : 0;
+      const tr = Math.max(bars[i].h - bars[i].l, Math.abs(bars[i].h - bars[i - 1].c), Math.abs(bars[i].l - bars[i - 1].c));
+      if (i <= period) {
+        trS += tr; pS += pdm; mS += mdm;
+        if (i < period) continue;
+      } else {
+        trS = trS - trS / period + tr;
+        pS = pS - pS / period + pdm;
+        mS = mS - mS / period + mdm;
+      }
+      const pdi = trS > 0 ? (pS / trS) * 100 : 0;
+      const mdi = trS > 0 ? (mS / trS) * 100 : 0;
+      out.pdi[i] = pdi; out.mdi[i] = mdi;
+      const dx = pdi + mdi > 0 ? (Math.abs(pdi - mdi) / (pdi + mdi)) * 100 : 0;
+      dxArr.push(dx);
+      if (dxArr.length === period) out.adx[i] = dxArr.reduce((a, b) => a + b, 0) / period;
+      else if (dxArr.length > period) {
+        const prev = out.adx[i - 1] != null ? out.adx[i - 1] : dxArr[dxArr.length - 2];
+        out.adx[i] = (prev != null) ? (prev * (period - 1) + dx) / period : out.adx[i];
+      }
+    }
+    return out;
+  }
+
+  // Stochastic %K/%D (14, 3): 0..100, зоны перекупленности/перепроданности
+  function stochSeries(bars, kPeriod, dPeriod) {
+    kPeriod = kPeriod || 14; dPeriod = dPeriod || 3;
+    const n = bars.length;
+    const k = new Array(n).fill(null);
+    for (let i = kPeriod - 1; i < n; i++) {
+      let hh = -Infinity, ll = Infinity;
+      for (let j = i - kPeriod + 1; j <= i; j++) { hh = Math.max(hh, bars[j].h); ll = Math.min(ll, bars[j].l); }
+      k[i] = hh > ll ? ((bars[i].c - ll) / (hh - ll)) * 100 : 50;
+    }
+    const d = new Array(n).fill(null);
+    for (let i = 0; i < n; i++) {
+      if (k[i] == null) continue;
+      let sum = 0, cnt = 0;
+      for (let j = Math.max(0, i - dPeriod + 1); j <= i; j++) { if (k[j] != null) { sum += k[j]; cnt++; } }
+      if (cnt === dPeriod) d[i] = sum / cnt;
+    }
+    return { k, d };
+  }
+
+  return { sma, emaSeries, bollinger, rsiSeries, macdSeries, atrSeries, ichimoku, highest, lowest, rocSeries, adxSeries, stochSeries };
 })();
 
 window.Ind = Ind;

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <script>
+    /* GitHub Pages SPA-фолбэк: на любой несуществующий путь GH Pages отдаёт этот файл.
+       Редкий случай «адрес с хвостовым слэшем» (/repo/signals/) — нормализуем без слэша,
+       чтобы относительные пути js/css разрешились от /repo/. Обычные ссылки грузятся сразу. */
+    (function () {
+      var m = location.pathname.match(/\/([a-z]{3,10})\/$/i);
+      var V = ["desk", "signals", "whales", "market", "events", "trades", "accounts", "portfolio", "leaders"];
+      if (m && V.indexOf(m[1].toLowerCase()) !== -1) location.replace(location.pathname.slice(0, -1) + location.search + location.hash);
+    })();
+  </script>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>XenoAI Trade — платформа автоматического ИИ-трейдинга</title>
+  <meta name="description" content="XenoAI Trade: лаборатория стратегий на реальных ценах, сигналы, киты, события, демо-торговля в ХРЮ, ИИ-автопилот со защитой от скама.">
+  <meta name="theme-color" content="#0a080d">
+  <!-- PWA: установка как приложение (Android/desktop) + полноэкранный режим на iOS -->
+  <link rel="manifest" href="manifest.json">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="XenoAI Trade">
+  <meta name="application-name" content="XenoAI Trade">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="XenoAI Trade — ИИ-трейдинг на реальных ценах">
+  <meta property="og:description" content="Лаборатория стратегий, ИИ-автопилот, киты и сигналы. Демо-торговля в ХРЮ по реальным ценам. Спот · без плеча.">
+  <meta property="og:image" content="icon.svg">
+  <meta name="twitter:card" content="summary">
+  <link rel="icon" type="image/svg+xml" href="icon.svg">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+  <link rel="stylesheet" href="css/styles.css?v=20261025">
+</head>
+<body>
+  <div id="root"></div>
+  <div id="modal-root"></div>
+  <div id="toast-root"></div>
+
+  <script defer src="js/format.js?v=20261025"></script>
+  <script defer src="js/data.js?v=20261025"></script>
+  <script defer src="js/indicators.js?v=20261025"></script>
+  <script defer src="js/candles.js?v=20261025"></script>
+  <script defer src="js/binance.js?v=20261025"></script>
+  <script defer src="js/live.js?v=20261025"></script>
+  <script defer src="js/engine.js?v=20261025"></script>
+  <script defer src="js/charts.js?v=20261025"></script>
+  <script defer src="js/store.js?v=20261025"></script>
+  <script defer src="js/whalesdb.js?v=20261025"></script>
+  <script defer src="js/glm.js?v=20261025"></script>
+  <script defer src="js/notify.js?v=20261025"></script>
+  <script defer src="js/ui.js?v=20261025"></script>
+  <script defer src="js/views-core.js?v=20261025"></script>
+  <script defer src="js/views-trade.js?v=20261025"></script>
+  <script defer src="js/auth.js?v=20261025"></script>
+  <script defer src="js/app.js?v=20261025"></script>
+</body>
+</html>

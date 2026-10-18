@@ -124,10 +124,30 @@ const Engine = (() => {
   }
 
   // ================= ИИ-анализ: ансамбль индикаторов =================
-  // Взвешенное голосование 8 факторов (включая новостной фон) → вердикт
-  // лонг/шорт/ожидание, уверенность и уровни сделки (стоп 1.2×ATR, цель 2R).
-  // brain = память ИИ (Store.state.aiBrain): адаптивные веса, выученные на результатах сделок.
-  const AI_BASE_WEIGHTS = { trend: 0.20, rsi: 0.15, macd: 0.16, bb: 0.13, ichi: 0.11, vol: 0.09, roc: 0.07, news: 0.09 };
+  // Взвешенное голосование 13 факторов (тренд, RSI, MACD, BB, Ишимоку, объём,
+  // импульс, новости, ADX, стохастик, старший таймфрейм, киты, GLM-аналитик) →
+  // вердикт лонг/шорт/ожидание, уверенность, доля согласия (agreeShare) и уровни
+  // сделки (стоп 1.2×ATR, цель 2R). brain = глобальная память ИИ (Store.state.aiBrain):
+  // адаптивные веса, выученные на результатах сделок (в т.ч. лабораторных).
+  const AI_BASE_WEIGHTS = { trend: 0.13, rsi: 0.1, macd: 0.11, bb: 0.08, ichi: 0.07, vol: 0.07, roc: 0.06, news: 0.08, adx: 0.09, stoch: 0.06, htf: 0.06, whale: 0.05, glm: 0.04 };
+
+  // агрегирует 15м-свечи в старший таймфрейм (1ч = 4×15м) для фильтра HTF-тренда
+  function toHigherTf(bars, group) {
+    const out = [];
+    for (let i = 0; i < bars.length; i += group) {
+      const chunk = bars.slice(i, i + group);
+      if (!chunk.length) break;
+      out.push({
+        o: chunk[0].o,
+        c: chunk[chunk.length - 1].c,
+        h: Math.max.apply(null, chunk.map((b) => b.h)),
+        l: Math.min.apply(null, chunk.map((b) => b.l)),
+        v: chunk.reduce((a, b) => a + (b.v || 0), 0),
+        t: chunk[0].t,
+      });
+    }
+    return out;
+  }
 
   // ------- новостной сентимент: словарный анализ реальной ленты -------
   const LEX_BULL = ["surge", "rally", "bullish", "soar", "jump", "adoption", "partnership", "upgrade", "launch", "approval", "approved", "inflow", "accumulate", "milestone", "all-time high", "ath", "breakout", "integration", "mainnet", "staking", "etf", "institutional", "recovery", "bull run", "gains", "record", "expansion", "buy the dip", "positive", "growth", "surpassed", "milestone"];
@@ -161,7 +181,9 @@ const Engine = (() => {
     };
   }
 
-  function aiAnalyze(sym, bars, brain, newsItems) {
+  // ---- контекст анализа: базовые метрики + 12 факторов ансамбля ----
+  // Используется и полным aiAnalyze (вердикт), и снапшотом для лабораторных сделок.
+  function buildAiContext(sym, bars, brain, newsItems, extra) {
     const a = analyzeBars(bars);
     if (!a) return null;
     const closes = bars.map((b) => b.c);
@@ -251,17 +273,127 @@ const Engine = (() => {
       });
     }
 
-    // взвешенный счёт (нормировка на сумму активных весов)
+    // 9) ADX(14): сила тренда и направление DI — сильный тренд подтверждает вход,
+    //    слабый (ADX < 18) — рынок в боковике, ловить импульс опасно
+    const adxRes = Ind.adxSeries(bars, 14);
+    const adxV = adxRes.adx[n - 1];
+    const pdiV = adxRes.pdi[n - 1], mdiV = adxRes.mdi[n - 1];
+    let atrPct = 0.3, flashRatio = 1;
+    if (adxV != null && pdiV != null && mdiV != null) {
+      const diSign = pdiV > mdiV ? 1 : -1;
+      const strength = Math.min(1, Math.max(0, (adxV - 15) / 30)); // 15..45 → 0..1
+      const dir = adxV < 15 ? 0 : diSign * (0.35 + 0.65 * strength);
+      factors.push({
+        key: "adx", label: "ADX · сила тренда", weight: W("adx"), dir,
+        detail: `ADX ${adxV.toFixed(0)} · DI${diSign > 0 ? "+" : "−"} ${Math.max(pdiV, mdiV).toFixed(0)} против ${Math.min(pdiV, mdiV).toFixed(0)} · ${adxV < 15 ? "боковик" : adxV < 25 ? "слабый тренд" : adxV < 40 ? "зрелый тренд" : "очень сильный тренд"}`,
+      });
+    }
+
+    // 10) Stochastic (14,3): перекупленность/перепроданность по положению в диапазоне
+    const st = Ind.stochSeries(bars, 14, 3);
+    const kV = st.k[n - 1], dV = st.d[n - 1];
+    if (kV != null && dV != null) {
+      let dir, txt;
+      if (kV <= 20) { dir = kV > dV ? 1 : 0.4; txt = `глубокая перепроданность %K ${kV.toFixed(0)}${kV > dV ? " · %K пересёк %D вверх" : ""}`; }
+      else if (kV >= 80) { dir = kV < dV ? -1 : -0.4; txt = `перекупленность %K ${kV.toFixed(0)}${kV < dV ? " · %K пересёк %D вниз" : ""}`; }
+      else if (kV > dV && kV < 55) { dir = 0.3; txt = `разворот %K вверх из нижней половины (${kV.toFixed(0)})`; }
+      else if (kV < dV && kV > 45) { dir = -0.3; txt = `разворот %K вниз из верхней половины (${kV.toFixed(0)})`; }
+      else { dir = 0; txt = `нейтрально %K ${kV.toFixed(0)} / %D ${dV.toFixed(0)}`; }
+      factors.push({ key: "stoch", label: "Стохастик (14,3)", weight: W("stoch"), dir, detail: txt });
+    }
+
+    // 11) Старший таймфрейм (1ч): куда смотрит большая картина — против HTF
+    //     входим только с дисконтом (контртренд = повышенный риск)
+    const htfBars = toHigherTf(bars, 4);
+    if (htfBars.length >= 25) {
+      const hCloses = htfBars.map((b) => b.c);
+      const hEma = Ind.emaSeries(hCloses, 20);
+      const hEmaV = hEma[hEma.length - 1];
+      const hEmaPrev = hEma[hEma.length - 4];
+      if (hEmaV != null && hEmaPrev != null) {
+        const hRel = ((price - hEmaV) / hEmaV) * 100;
+        const hSlope = ((hEmaV - hEmaPrev) / hEmaPrev) * 100;
+        const dir = hRel > 0.4 && hSlope > 0 ? 1 : hRel < -0.4 && hSlope < 0 ? -1 : hRel > 0 ? 0.3 : hRel < 0 ? -0.3 : 0;
+        factors.push({
+          key: "htf", label: "Старший ТФ · 1ч EMA20", weight: W("htf"), dir,
+          detail: `цена ${hRel >= 0 ? "+" : "−"}${Math.abs(hRel).toFixed(2)}% к EMA20 · наклон ${hSlope >= 0 ? "+" : "−"}${Math.abs(hSlope).toFixed(2)}% · ${dir === 1 ? "восходящий" : dir === -1 ? "нисходящий" : "плоский"}`,
+        });
+      }
+    }
+
+    // 12) Киты: перевес крупных покупок над продажами (лента aggTrades биржи)
+    //     + ончейн-потоки отслеживаемых кошельков-китов (база WhalesDB) — два
+    //     независимых источника про одних и тех же больших игроков: смешиваем.
+    const whaleMkt = extra && extra.whale && extra.whale.dir !== 0 ? extra.whale : null;
+    const whaleChain = extra && extra.onchain && extra.onchain.dir !== 0 ? extra.onchain : null;
+    if (whaleMkt || whaleChain) {
+      let dir = 0, detail = "";
+      if (whaleMkt && whaleChain) {
+        dir = Math.max(-1, Math.min(1, whaleMkt.dir * 0.6 + whaleChain.dir * 0.4));
+        detail = `${whaleMkt.detail} · ${whaleChain.detail}`;
+      } else {
+        const one = whaleMkt || whaleChain;
+        dir = one.dir;
+        detail = one.detail;
+      }
+      factors.push({
+        key: "whale", label: "Киты · поток", weight: W("whale"), dir,
+        detail,
+      });
+    }
+
+    // 13) GLM-аналитик: большая языковая модель (Z.AI / BigModel) смотрит на сводку
+    //     рынка и даёт вердикт лонг/шорт/вне рынка — работает наравне с индикаторами
+    //     и обучается вместе с ними. Без ключа фактор просто отсутствует.
+    if (extra && extra.glm && extra.glm.dir !== 0) {
+      factors.push({
+        key: "glm", label: "GLM · языковая модель", weight: W("glm"), dir: extra.glm.dir,
+        detail: extra.glm.detail,
+      });
+    }
+
+    // ---- производные метрики риска ----
+    atrPct = (a.atr / price) * 100;
+    const lastBar = bars[n - 1];
+    flashRatio = a.atr > 0 ? (lastBar.h - lastBar.l) / a.atr : 1;
+
+    return { a, factors, price, atrPct, flashRatio, closes, n };
+  }
+
+  // снапшот факторов для обучения: используется лабораторией при открытии сделки
+  function aiFactorSnapshot(sym, bars, brain, newsItems, extra) {
+    const ctx = buildAiContext(sym, bars, brain, newsItems, extra);
+    if (!ctx) return null;
+    return {
+      confidence: null, // у лаборатории своя уверенность стратегии
+      factors: ctx.factors.map((f) => ({ key: f.key, dir: f.dir, weight: f.weight })),
+      score: null, lab: true,
+    };
+  }
+
+  function aiAnalyze(sym, bars, brain, newsItems, extra) {
+    const ctx = buildAiContext(sym, bars, brain, newsItems, extra);
+    if (!ctx) return null;
+    const { a, factors, price, atrPct, flashRatio } = ctx;
+
+    // взвешенный счёт (нормировка на сумму активных весов) + доля согласия
     let raw = 0, sumW = 0;
     for (const f of factors) { raw += f.dir * f.weight; sumW += f.weight; }
     let score = raw / (sumW || 1);
     score = Math.max(-1, Math.min(1, score));
 
+    // доля веса факторов, голосующих с итоговым направлением (0..1):
+    // чем одностороннее картина — тем надёжнее сигнал; разноголосица = риск
+    const sideSign = score >= 0 ? 1 : -1;
+    let agreeW = 0;
+    for (const f of factors) if (f.dir * sideSign > 0) agreeW += f.weight;
+    const agreeShare = sumW > 0 ? agreeW / sumW : 0;
+
     const ts = Date.now();
     if (Math.abs(score) < 0.14) {
       return {
         sym, ts, verdict: "wait", confidence: Math.round(40 + Math.abs(score) * 90),
-        price, stop: 0, target: 0, riskPct: 0, factors, score,
+        price, stop: 0, target: 0, riskPct: atrPct * 1.2, atrPct, flashRatio, factors, score, agreeShare,
         note: "факторы разнонаправлены — уверенного входа нет",
       };
     }
@@ -270,14 +402,37 @@ const Engine = (() => {
     const risk = Math.max(a.atr * 1.2, price * 0.004);
     const stop = side === "лонг" ? price - risk : price + risk;
     const target = side === "лонг" ? price + risk * 2 : price - risk * 2;
-    const confidence = Math.round(Math.min(93, 56 + Math.abs(score) * 48));
+    // уверенность: сила счёта + бонус за односторонность факторов − штраф за разноголосицу
+    const confidence = Math.round(Math.max(50, Math.min(93, 54 + Math.abs(score) * 46 + (agreeShare - 0.5) * 24)));
     const top = [...factors].sort((x, y) => Math.abs(y.dir * y.weight) - Math.abs(x.dir * x.weight)).slice(0, 3);
     return {
       sym, ts, verdict: side, confidence, price, stop, target,
       riskPct: (risk / price) * 100, targetPct: ((risk * 2) / price) * 100,
-      factors, score,
+      atrPct, flashRatio, factors, score, agreeShare,
       note: top.map((f) => `${f.label}: ${f.detail}`).join(" · "),
     };
+  }
+
+  // ---- трейлинг-защита ИИ-позиции: стоп двигается ТОЛЬКО в пользу сделки ----
+  // +1R  → стоп в безубыток (вход + 0.1R в плюс: покрываем комиссию)
+  // +1.5R → стоп фиксирует +0.5R
+  // +2R  → трейлинг на расстоянии 1R от текущей цены
+  // Убыток трейлинг не ускоряет: раньше стопа позицию не закрывает (требование 12).
+  function aiTrailStop(pos, price) {
+    if (!pos || !pos.ai || pos.strategy !== "ai") return null;
+    // r0 фиксируем при первом трейлинге: после сдвига стопа |entry−stop| уже не исходный риск
+    if (!pos.r0 || !(pos.r0 > 0)) pos.r0 = Math.abs(pos.entry - pos.stop);
+    const r0 = pos.r0;
+    if (!r0 || r0 <= 0) return null;
+    const dir = pos.side === "лонг" ? 1 : -1;
+    const gainR = (dir * (price - pos.entry)) / r0;
+    if (gainR < 1) return null;
+    let want;
+    if (gainR >= 2) want = price - dir * r0;          // трейлинг 1R
+    else if (gainR >= 1.5) want = pos.entry + dir * r0 * 0.5; // фикс +0.5R
+    else want = pos.entry + dir * r0 * 0.1;           // безубыток+комиссия
+    const better = dir === 1 ? want > pos.stop : want < pos.stop;
+    return better ? want : null;
   }
 
   function mkLabAccounts() {
@@ -293,7 +448,7 @@ const Engine = (() => {
     }));
   }
 
-  return { STRATEGIES, analyzeBars, evalStrategy, evalExit, positionPnl, closeTrade, mkLabAccounts, aiAnalyze, newsSentiment, AI_BASE_WEIGHTS, FEE_RATE };
+  return { STRATEGIES, analyzeBars, evalStrategy, evalExit, positionPnl, closeTrade, mkLabAccounts, aiAnalyze, aiFactorSnapshot, aiTrailStop, newsSentiment, AI_BASE_WEIGHTS, FEE_RATE };
 })();
 
 window.Engine = Engine;

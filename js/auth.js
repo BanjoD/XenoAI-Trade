@@ -30,7 +30,8 @@ const Auth = (() => {
 
   function dataKey() {
     const login = sessionLogin();
-    return login ? `xenoai_v2_${login.toLowerCase()}` : "xenoai_v2_anon";
+    // синхронно с store.js (STORAGE_VER = xenoai_v3)
+    return login ? `xenoai_v3_${login.toLowerCase()}` : "xenoai_v3_anon";
   }
 
   function login(l, p) {

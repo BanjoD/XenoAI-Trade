@@ -48,7 +48,7 @@ const ViewsTrade = (() => {
       { price: p.low24, label: "24ч мин", color: "gray", dashed: true },
     ];
 
-    // лента китов под графиком
+    // лента китов под графиком (у GRAM она обычная биржевая — TON/USDT)
     const whaleFeed = whalesArr.length === 0
       ? `<div style="padding:8px 0;font-size:12px;color:#52525b">Загружаю ленту aggTrades…</div>`
       : `<div class="mkt-whales-grid">` + whalesArr.slice(0, 8).map((w) => `
@@ -193,11 +193,11 @@ const ViewsTrade = (() => {
         <span class="ai-ico">${h.icon("sparkles", 17)}</span>
         <div style="min-width:0;flex:1">
           <div class="ai-title">Сделка на базе ИИ</div>
-          <div class="ai-sub">ML-ансамбль 8 индикаторов · новости · учится на каждой сделке</div>
+          <div class="ai-sub">ансамбль 13 факторов · ADX, HTF, киты, GLM · учится на каждой сделке</div>
         </div>
-        ${live ? "" : `<button class="ai-auto-pill ${s.aiAuto ? "on" : ""}" data-action="ai:auto" title="ИИ сам заходит в монеты и флипает">
-          <span class="d"></span> автопилот ${s.aiAuto ? "вкл" : "выкл"}
-        </button>`}
+        <button class="ai-auto-pill ${s.mode === "live" ? (s.aiAutoLive ? "on" : "") : (s.aiAuto ? "on" : "")}" data-action="ai:auto" title="${s.mode === "live" ? "В реальном режиме автопилот по умолчанию выключен — включается только явно" : "ИИ сам заходит в монеты и флипает"}">
+          <span class="d"></span> автопилот ${s.mode === "live" ? (s.aiAutoLive ? "вкл · симуляция" : "выкл") : (s.aiAuto ? "вкл" : "выкл")}
+        </button>
       </div>`;
 
     // ---- сессия автопилота: прогресс к авто-стопу ±лимит (по умолчанию 50%) ----
@@ -247,19 +247,67 @@ const ViewsTrade = (() => {
       </div>`;
     }
 
-    // ---- мини-статистика памяти ИИ ----
+    // ---- лимиты сделок: макс. одна + суммарный → авторасчёт одновременных позиций ----
+    const dealCap = Store.aiDealCap();
+    const totalCap = Store.aiTotalCap();
+    const remainV = Store.aiTotalRemain();
+    const autoPos = Store.autoMaxPos();
+    const effPos = Store.effMaxPos();
+    const posMode = s.aiPosMode;
+    const limitsHtml = `
+      <div class="ai-limit-row">
+        <span class="lbl">${h.icon("shield", 12)} макс. одна сделка</span>
+        <span class="custom-wrap">
+          <input id="ai-deal-input" class="inp num" data-role="ai-deal" inputmode="numeric" placeholder="${dealCap}" value="" title="Максимальная сумма одной сделки, ХРЮ (≈ $)">
+          <span class="pct">ХРЮ</span>
+          <button class="limit-apply" data-action="ai:deal" title="Применить лимит одной сделки">OK</button>
+        </span>
+      </div>
+      <div class="ai-limit-row">
+        <span class="lbl">${h.icon("swap", 12)} макс. все сделки</span>
+        <span class="custom-wrap">
+          <input id="ai-total-input" class="inp num" data-role="ai-total" inputmode="numeric" placeholder="${totalCap}" value="" title="Максимальная суммарная сумма всех сделок в рынке, ХРЮ (≈ $)">
+          <span class="pct">ХРЮ</span>
+          <button class="limit-apply" data-action="ai:total" title="Применить суммарный лимит">OK</button>
+        </span>
+      </div>
+      <div class="ai-limit-row">
+        <span class="lbl">${h.icon("grid", 12)} одновременно</span>
+        <div class="limit-chips">
+          <button class="limit-chip ${posMode === "auto" ? "active" : ""}" data-action="ai:maxpos" data-arg="auto" title="Число позиций считается из лимитов автоматически: суммарный лимит ÷ лимит одной сделки">АВТО·${autoPos}</button>
+          ${[1, 2, 3, 4, 5, 6, 7, 8].map((v) => `<button class="limit-chip num ${posMode === v ? "active" : ""}" data-action="ai:maxpos" data-arg="${v}" title="Ручной лимит: не больше ${v} ИИ-сделок в рынке одновременно">${v}</button>`).join("")}
+        </div>
+      </div>
+      <div class="ai-limit-note">Одновременных ИИ-позиций: <b>${effPos}</b>${posMode === "auto" ? ` — авто из лимитов (${Fmt.fmtNum(totalCap)} ÷ ${Fmt.fmtNum(dealCap)})` : " — ручной лимит"} · свободно по суммарному лимиту: ${Fmt.fmtNum(Math.round(remainV))} ХРЮ (≈ $${Fmt.fmtNum(Math.round(remainV))}). Лимиты действуют на все сделки счёта — ИИ, сигналы и ручные.</div>`;
+
+    // ---- мини-статистика памяти ИИ + статус GLM-аналитика ----
     const brain = s.aiBrain || {};
     const wr = brain.trades ? Math.round((brain.wins / brain.trades) * 100) : null;
     const brainMini = `<div class="ai-brain-mini num">${h.icon("cpu", 11)} опыт: ${brain.trades || 0} сделок${wr != null ? ` · винрейт ${wr}%` : ""} · порог входа ${brain.confThreshold || 76}% · память ${brain.weights ? "адаптирована" : "базовая"}</div>`;
+    const glmSt = window.GLM ? GLM.status() : { status: "not-configured" };
+    const glmOn = window.GLM && GLM.enabled();
+    const glmTxt = !glmOn
+      ? "GLM не подключён — добавьте бесплатный ключ, и языковая модель станет 13-м фактором ансамбля"
+      : glmSt.status === "ok"
+        ? `GLM: ${glmSt.bias === "flat" ? "вне рынка" : glmSt.bias || "—"} ${glmSt.confidence}% · ${h.esc(String(glmSt.reasoning || "").slice(0, 90))}`
+        : glmSt.status === "asking" ? "GLM смотрит на рынок…"
+        : glmSt.status === "error" ? `GLM: ошибка — ${h.esc(String(glmSt.error || "").slice(0, 70))}`
+        : "GLM подключён, ждёт первого опроса (до 10 минут)";
+    const glmRow = `
+      <div class="glm-row ${glmOn ? "on" : ""}">
+        <span class="glm-ico">${h.icon("cpu", 12)}</span>
+        <span class="glm-txt">${glmTxt}</span>
+        <button class="link-btn" data-action="glm:open" title="Настройки GLM-аналитика: ключ, модель, провайдер">${glmOn ? "настройки" : "подключить"}</button>
+      </div>`;
 
     let body = "";
     if (!fresh) {
       body = `
         <button class="ai-cta" data-action="ai:analyze" data-arg="${sym}">${h.icon("sparkles", 14)} Проанализировать ${sym} и дать вердикт</button>
-        <div class="ai-help">ИИ взвешивает тренд, RSI, MACD, Боллинджера, Ишимоку, объём, импульс и новостной фон,
-        сам выбирает направление, стоп и цель. Только спот: «лонг» — тренд вверх, «шорт» — тренд вниз. Мощная защита:
-        скам-фильтр, новостные риски и авто-стоп сессии ±${th}% (лимит настраивается ниже). После каждой закрытой сделки ИИ корректирует веса факторов —
-        с каждой сделкой становится аккуратнее. ${live ? "В реальном режиме вердикт подскажет вход — ордер отправите кнопкой ниже." : "Автопилот может открывать и флипать сделки сам."}</div>`;
+        <div class="ai-help">ИИ взвешивает 12 факторов: тренд, RSI, MACD, Боллинджера, Ишимоку, объём, импульс,
+        новостной фон, ADX (силу тренда), стохастик, старший таймфрейм 1ч и поток китов. Сам выбирает направление,
+        стоп и цель. Защита в несколько слоёв: скам-фильтр, новостные риски, гварды волатильности и вспышек,
+        безубыток с +1R, пауза после серии минусов и авто-стоп сессии ±${th}%. С каждой закрытой сделкой (вашей или лабораторной) ИИ корректирует веса. ${live ? "В реальном режиме вердикт подскажет вход — ордер отправите кнопкой ниже." : "Автопилот может открывать и флипать сделки сам."}</div>;`;
     } else {
       const r = fresh.res;
       if (r.verdict === "wait") {
@@ -272,8 +320,7 @@ const ViewsTrade = (() => {
         </div>`;
       } else {
         const isLong = r.verdict === "лонг";
-        const size = Math.max(200, Math.min(1000, Math.round(s.balance * 0.1)));
-        const sizeStr = Fmt.fmtNum(Math.min(size, Math.max(0, Math.round(s.balance))));
+        const sc = Store.aiSizeCalc();
         const factorRows = r.factors.map((f) => {
           const d = f.dir > 0 ? "up" : f.dir < 0 ? "down" : "flat";
           const arrow = f.dir > 0 ? "▲" : f.dir < 0 ? "▼" : "•";
@@ -291,15 +338,69 @@ const ViewsTrade = (() => {
           <div class="ai-factors">${factorRows}</div>
           ${live
             ? `<button class="ai-open" data-action="live:order-ai">Отправить рыночный ордер по сигналу ИИ</button>`
-            : s.balance >= 200
-              ? `<button class="ai-open" data-action="ai:open">Открыть ${r.verdict} по сигналу ИИ · ${sizeStr} ХРЮ (≈ ${Fmt.fmtUsd(Math.min(size, Math.max(0, Math.round(s.balance))))})</button>`
-              : `<div class="ai-wait">Минимум для ИИ-сделки — 200 ХРЮ. Пополните демо-счёт в кабинете.</div>`}
-          <div class="ai-ts"><span>расчёт ${Fmt.fmtClock(fresh.ts)} · RR 1:2 · спот · веса ИИ ${s.aiBrain && s.aiBrain.weights ? "адаптированы" : "базовые"}</span><button class="link-btn" data-action="ai:analyze" data-arg="${sym}">пересчитать</button></div>
+            : sc.size > 0
+              ? `<button class="ai-open" data-action="ai:open">Открыть ${r.verdict} по сигналу ИИ · ${Fmt.fmtNum(sc.size)} ХРЮ (≈ ${Fmt.fmtUsd(sc.size)})</button>`
+              : `<div class="ai-wait">ИИ-сделка не влезает в лимиты: свободно ${Fmt.fmtNum(Math.round(Store.aiTotalRemain()))} ХРЮ суммарного лимита при балансе ${Fmt.fmtNum(Math.round(s.balance))} ХРЮ. Поднимите лимиты или пополните счёт.</div>`}
+          <div class="ai-ts"><span>расчёт ${Fmt.fmtClock(fresh.ts)} · RR 1:2 · согласие факторов ${Math.round((r.agreeShare || 0) * 100)}% · спот</span><button class="link-btn" data-action="ai:analyze" data-arg="${sym}">пересчитать</button></div>
         </div>`;
       }
     }
 
-    return `<div class="ai-block">${head}${sessionHtml}${live ? "" : limitHtml}${stopHtml}${brainMini}${body}</div>`;
+    return `<div class="ai-block">${head}${sessionHtml}${live ? "" : limitHtml}${live ? "" : limitsHtml}${stopHtml}${brainMini}${glmRow}${body}</div>`;
+  }
+
+  // ================= МОДАЛКА GLM-АНАЛИТИКА (13-й фактор ансамбля) =================
+  function glmModal() {
+    if (!window.GLM) return `<div style="padding:20px">Модуль GLM не загружен</div>`;
+    const cfg = GLM.getSettings();
+    const st = GLM.status();
+    const presets = GLM.presets();
+    const statusHtml = !cfg.apiKey
+      ? `<div class="ai-wait" style="margin-top:0">Ключа нет: GLM работает как обычный аналитик «на бумаге» — в ансамбль не входит. Получите бесплатный ключ (bigmodel.cn или z.ai) и вставьте ниже.</div>`
+      : st.status === "ok"
+        ? `<div class="sync-state"><span class="np-ok">подключено · ${h.esc(st.model || cfg.model)}</span><div class="num" style="margin-top:6px;font-size:12px">последний вердикт: <b>${st.bias === "flat" ? "вне рынка" : h.esc(st.bias || "—")} ${st.confidence}%</b> ${st.ts ? "· " + Fmt.fmtClock(st.ts) : ""}<br><span style="color:#a99bb5">${h.esc(st.reasoning || "")}</span></div></div>`
+        : st.status === "error"
+          ? `<div class="ai-wait" style="margin-top:0;color:#f87171">Ошибка: ${h.esc(st.error || "")}</div>`
+          : `<div class="ai-wait" style="margin-top:0">Статус: ${st.status === "asking" ? "запрос к модели…" : "ключ сохранён, ждём опроса"}</div>`;
+    return `
+    <div>
+      <div class="cab-head">
+        <span class="cab-icon" style="background:rgba(255,45,120,0.13)">${h.icon("cpu", 22)}</span>
+        <div>
+          <h2 class="cab-title">GLM-аналитик</h2>
+          <p class="cab-sub">языковая модель GLM как 13-й фактор ансамбля ИИ</p>
+        </div>
+      </div>
+      <div class="cab-body">
+        ${statusHtml}
+        <div class="notify-sec">Провайдер и модель</div>
+        <div class="ai-limit-row" style="flex-wrap:wrap">
+          <div class="limit-chips">
+            ${presets.map((p) => `<button class="limit-chip ${cfg.endpoint === p.url ? "active" : ""}" data-action="glm:preset" data-arg="${p.id}">${h.esc(p.label)}</button>`).join("")}
+          </div>
+        </div>
+        <div class="ai-limit-row">
+          <span class="lbl">модель</span>
+          <span class="custom-wrap" style="flex:1">
+            <input id="glm-model" class="inp num" value="${h.esc(cfg.model)}" placeholder="glm-4-flash · glm-4.6 · glm-4.5-air" style="width:100%">
+          </span>
+        </div>
+        <div class="ai-limit-note">glm-4-flash у BigModel бесплатный; для Z.AI подойдёт glm-4.6. Можно вписать свою модель вручную.</div>
+        <div class="notify-sec">API-ключ</div>
+        <div class="ai-limit-row">
+          <span class="custom-wrap" style="flex:1">
+            <input id="glm-key" class="inp" type="password" value="${h.esc(cfg.apiKey)}" placeholder="вставьте ключ API (хранится только в этом браузере)" style="width:100%">
+          </span>
+        </div>
+        <div class="ai-limit-note">Ключ уходит ТОЛЬКО напрямую в API провайдера из вашего браузера — платформа его никуда не пересылает. Без ключа фактор GLM просто отсутствует, остальные 12 факторов работают как раньше.</div>
+        <div class="notify-actions" style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="ai-open" data-action="glm:save">Сохранить и включить</button>
+          <button class="btn-ghost" data-action="glm:test">${h.icon("zap", 13)} Спросить GLM сейчас</button>
+          ${cfg.apiKey ? `<button class="btn-ghost" data-action="glm:off">Выключить фактор</button>` : ""}
+          <button class="btn-ghost" data-action="modal:close">Закрыть</button>
+        </div>
+      </div>
+    </div>`;
   }
 
   // ================= форма сделки (демо ХРЮ / реальный рынок) =================
@@ -321,7 +422,7 @@ const ViewsTrade = (() => {
     const stop = f.side === "лонг" ? price - risk : price + risk;
     const target = f.side === "лонг" ? price + risk * 2 : price - risk * 2;
 
-    const syms = `<div class="chip-row scroll" style="margin-bottom:8px">` + DataLib.WATCHLIST.slice(0, 12).map((i) => `
+    const syms = `<div class="chip-row scroll" style="margin-bottom:8px">` + DataLib.WATCHLIST.map((i) => `
       <button class="chip ${f.sym === i.sym ? "active" : ""}" style="padding:6px 10px;font-size:12px" data-action="form:sym" data-arg="${i.sym}">${h.coin(i.sym, 16)} ${i.sym}</button>`).join("") + `</div>`;
 
     return `<div class="tform">
@@ -376,7 +477,7 @@ const ViewsTrade = (() => {
 
     if (!conn) return `<div class="tform">${aiBlock(f.sym)}${head}</div>`;
 
-    const syms = `<div class="chip-row scroll" style="margin-bottom:8px">` + DataLib.WATCHLIST.slice(0, 12).map((i) => `
+    const syms = `<div class="chip-row scroll" style="margin-bottom:8px">` + DataLib.WATCHLIST.map((i) => `
       <button class="chip ${f.sym === i.sym ? "active" : ""}" style="padding:6px 10px;font-size:12px" data-action="form:sym" data-arg="${i.sym}">${h.coin(i.sym, 16)} ${i.sym}</button>`).join("") + `</div>`;
 
     return `<div class="tform">
@@ -523,6 +624,7 @@ const ViewsTrade = (() => {
 
           <section class="card">
             <div style="padding:12px 20px;border-bottom:1px solid var(--border);font-size:13.5px;font-weight:500;color:#d4d4d8">Позиции лаборатории · ${s.labPositions.length}</div>
+            <div class="ai-limit-note" style="padding:10px 20px 0">Это не ваши сделки: лаборатория — 5 виртуальных счетов стратегий (по 10 000 ХРЮ каждый), которые торгуют сами для показа статистики. Их плюс/минус остаётся внутри тестовых счетов и не попадает в ваш баланс. Но они не бесполезны: каждая закрытая лабораторная сделка со своим снапшотом факторов обучает общий мозг ИИ — включите автоторговлю лаборатории в «Счетах», чтобы данные текли.</div>
             ${labPosRows}
           </section>
 
@@ -842,6 +944,40 @@ const ViewsTrade = (() => {
     const s = S();
     const wins = s.userClosed.filter((c) => c.pnl > 0).length;
     const totalPnl = s.userClosed.reduce((a, c) => a + c.pnl, 0);
+    const sync = typeof Store.syncInfo === "function" ? Store.syncInfo() : null;
+    const catchI = typeof Store.catchInfo === "function" ? Store.catchInfo() : null;
+    const syncStatus = !sync ? "" : !sync.enabled
+      ? `<div class="sync-state">Синхронизация выключена — архив аккаунта живёт только в этом браузере.</div>`
+      : `<div class="sync-state">
+          <span class="np-ok">включена</span> · код <b class="num" id="sync-code-txt">${h.esc(sync.code || "—")}</b>
+          <button class="link-btn" data-action="sync:copy">${h.icon("copy", 12)} скопировать</button>
+          <div class="num" style="margin-top:4px;font-size:11.5px;color:#8d8a94">пуш: ${sync.lastPush ? Fmt.fmtClock(sync.lastPush) : "—"} · пул: ${sync.lastPull ? Fmt.fmtClock(sync.lastPull) : "—"}${sync.lastError ? ` · <span class="text-red">${h.esc(sync.lastError)}</span>` : ""}</div>
+        </div>`;
+    const syncBlock = `
+      <div class="notify-sec">Синхронизация устройств · вся история</div>
+      ${syncStatus}
+      ${!sync || !sync.enabled ? `
+      <div class="sync-actions">
+        <button class="btn-lime" data-action="sync:enable-new">${h.icon("radio", 13)} Включить синхронизацию</button>
+        <span class="custom-wrap" style="flex-shrink:0">
+          <input id="sync-code-inp" class="inp num" placeholder="код с другого устройства" style="width:190px">
+          <button class="limit-apply" data-action="sync:enable-code" title="Подключиться к архиву по коду">OK</button>
+        </span>
+      </div>
+      <div class="ai-limit-note">Включите на основном устройстве — получите код; на другом устройстве войдите в тот же аккаунт и введите код. Баланс, открытые позиции и ВСЯ история сделок/событий объединяются автоматически (пуш после каждого изменения, пул каждые 2 мин). История объединяется без потерь, даже если устройства торговали по отдельности.</div>`
+      : `<div class="sync-actions">
+          <button class="btn-ghost" data-action="sync:now">${h.icon("zap", 13)} Синхронизировать сейчас</button>
+          <button class="btn-ghost" data-action="sync:disable">Выключить</button>
+        </div>
+        <div class="ai-limit-note">Пока синк включён, все изменения (сделки, ИИ-входы, баланс) уезжают в облако и подтягиваются на другие устройства с этим кодом. Без интернета платформа продолжает работать — изменения уйдут при появлении сети.</div>`}
+      <div class="notify-sec">Резервная копия файлом</div>
+      <div class="sync-actions">
+        <button class="btn-ghost" data-action="backup:export">${h.icon("download", 13)} Скачать архив JSON</button>
+        <button class="btn-ghost" data-action="backup:import">${h.icon("upload", 13)} Восстановить из файла</button>
+        <input type="file" id="backup-file" accept=".json,application/json" style="display:none">
+      </div>
+      <div class="ai-limit-note">Файл — полный снимок аккаунта (баланс, позиции, вся история). Работает без интернета: удобно переносить на новое устройство или хранить как страховку. Восстановление объединяет архив с текущими данными, ничего не затирает.${catchI && catchI.lastCatchUp ? `<br><span class="num" style="color:#8d8a94">последний догон рынка: ${Fmt.fmtClock(catchI.lastCatchUp)} · сделки ИИ не прерывались в офлайне</span>` : ""}</div>`;
+
     return `
     <div>
       <div class="cab-head">
@@ -875,6 +1011,9 @@ const ViewsTrade = (() => {
         <div><div class="num v">${s.userClosed.length ? Math.round((wins / s.userClosed.length) * 100) : 0}%</div><div class="k">винрейт</div></div>
         <div><div class="num v ${totalPnl >= 0 ? "text-green" : "text-red"}">${totalPnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(totalPnl)))}</div><div class="k">реализовано ХРЮ</div></div>
         <div><div class="num v">${s.userPositions.length}</div><div class="k">в рынке</div></div>
+      </div>
+      <div class="cab-body" style="border-top:1px solid rgba(255,255,255,.06)">
+        ${syncBlock}
       </div>
       <div class="cab-foot">
         <p>Стартовый баланс: ${Fmt.fmtNum(s.startBalance)} ХРЮ. Выгода и убытки считаются по реальным рыночным ценам — но это виртуальные деньги, реальные средства не задействованы.</p>
@@ -980,7 +1119,7 @@ const ViewsTrade = (() => {
     </div>`;
   }
 
-  return { market, trades, accounts, portfolio, tradeForm, cabinet, liveModal, liveOrdersCard, aiBlock, notifyModal };
+  return { market, trades, accounts, portfolio, tradeForm, cabinet, liveModal, liveOrdersCard, aiBlock, notifyModal, glmModal };
 })();
 
 window.ViewsTrade = ViewsTrade;

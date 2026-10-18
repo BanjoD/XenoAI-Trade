@@ -30,7 +30,8 @@
 }
 
 * { box-sizing: border-box; border-color: var(--border); }
-html, body { margin: 0; padding: 0; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+html, body { margin: 0; padding: 0; max-width: 100%; overflow-x: clip; }
 body {
   background:
     radial-gradient(1100px 700px at 85% -10%, rgba(255, 45, 120, 0.065), transparent 55%),
@@ -45,8 +46,8 @@ body {
   -webkit-font-smoothing: antialiased;
   font-feature-settings: "tnum" 1, "cv11" 1;
 }
-button { font-family: inherit; letter-spacing: inherit; cursor: pointer; border: 0; background: none; color: inherit; }
-input { font-family: inherit; }
+button { font-family: inherit; letter-spacing: inherit; cursor: pointer; border: 0; background: none; color: inherit; -webkit-tap-highlight-color: transparent; }
+input, select, textarea { font-family: inherit; }
 a { color: inherit; text-decoration: none; }
 h1, h2, h3, p { margin: 0; }
 svg { display: block; }
@@ -811,3 +812,246 @@ input[type="range"] { width: 64px; accent-color: var(--accent); }
 .notify-master { flex-wrap: wrap; row-gap: 10px; }
 .notify-master .btn-lime, .notify-master .btn-ghost { width: auto; flex: 0 0 auto; white-space: nowrap; }
 .notify-master .nm-state { flex: 1 1 220px; }
+
+/* ================= карточка прогноза ИИ (Сигналы) ================= */
+.fc-box {
+  padding: 11px 13px; border: 1px solid var(--border); border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02); font-size: 12px; line-height: 1.6; color: #a99bb5;
+}
+.fc-summary {
+  padding: 12px 14px; border: 1px solid rgba(255, 45, 120, 0.25); border-radius: 14px;
+  background: rgba(255, 45, 120, 0.06); font-size: 12.5px; line-height: 1.7; color: #e7dced;
+}
+.fc-eta { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.fc-eta > div { padding: 9px 6px; text-align: center; border: 1px solid var(--border); border-radius: 12px; background: rgba(255, 255, 255, 0.02); }
+.fc-eta .k { font-size: 10px; color: #6f6480; margin-bottom: 3px; }
+.fc-eta .v { font-size: 13.5px; font-weight: 600; color: var(--foreground); }
+.ai-factor .w { flex: 1; max-width: 120px; height: 4px; border-radius: 999px; background: rgba(255, 255, 255, 0.07); overflow: hidden; flex-shrink: 0; }
+.ai-factor .w i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #ff2d78, #c74fd8); box-shadow: 0 0 6px rgba(255, 45, 120, 0.5); }
+.ai-factors .ai-factor { padding: 6px 0; border-bottom: 1px dashed rgba(255, 255, 255, 0.05); }
+.ai-factors .ai-factor:last-child { border-bottom: none; }
+.ai-factors .ai-factor .lbl { flex: 0 1 auto; max-width: 40%; }
+.ai-factors .ai-factor .det { flex: 1; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8d8098; }
+@media (max-width: 640px) {
+  .fc-eta { grid-template-columns: repeat(2, 1fr); }
+  .ai-factors .ai-factor { flex-wrap: wrap; }
+  .ai-factors .ai-factor .w { display: none; }
+}
+
+/* ============================================================
+   Новые компоненты: GLM-аналитик, ончейн-киты, синхронизация
+   ============================================================ */
+
+/* ---- GLM-аналитик (13-й фактор) ---- */
+.glm-row {
+  margin-top: 8px; display: flex; align-items: center; gap: 8px;
+  border: 1px solid rgba(139, 92, 246, 0.22); border-radius: 10px;
+  background: rgba(139, 92, 246, 0.06); padding: 7px 10px;
+}
+.glm-row.on { border-color: rgba(255, 45, 120, 0.3); background: rgba(255, 45, 120, 0.07); }
+.glm-row .glm-ico { color: #c4b5fd; flex-shrink: 0; display: flex; }
+.glm-row.on .glm-ico { color: var(--accent-2); }
+.glm-row .glm-txt { flex: 1; min-width: 0; font-size: 10.5px; line-height: 1.5; color: #a99bb5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.glm-row .link-btn { flex-shrink: 0; font-size: 10.5px; color: var(--accent-2); }
+
+/* ---- ончейн-киты (база кошельков) ---- */
+.wk-grid { display: grid; grid-template-columns: 1fr; gap: 8px; margin-bottom: 10px; }
+@media (min-width: 640px) { .wk-grid { grid-template-columns: repeat(2, 1fr); } }
+.wk-stat { border: 1px solid var(--border); border-radius: 12px; background: rgba(255, 255, 255, 0.02); padding: 10px 12px; }
+.wk-stat .k { font-size: 11px; color: #71717a; }
+.wk-stat .v { margin-top: 3px; font-size: 15px; font-weight: 700; letter-spacing: .02em; color: #d4d4d8; }
+.wk-stat.bull { border-color: rgba(255, 79, 163, 0.35); }
+.wk-stat.bull .v { color: var(--pink); text-shadow: 0 0 10px rgba(255, 79, 163, 0.4); }
+.wk-stat.bear { border-color: rgba(248, 113, 113, 0.3); }
+.wk-stat.bear .v { color: var(--red); }
+.wk-list { display: flex; flex-direction: column; }
+.wk-row { display: flex; align-items: center; gap: 10px; padding: 9px 2px; border-bottom: 1px dashed rgba(255, 255, 255, 0.05); }
+.wk-row:last-child { border-bottom: 0; }
+.wk-chain {
+  display: flex; width: 26px; height: 26px; flex-shrink: 0; align-items: center; justify-content: center;
+  border-radius: 999px; font-size: 13px; font-weight: 700;
+  background: rgba(255, 255, 255, 0.06); color: #d4d4d8;
+}
+.wk-lbl { font-size: 12.5px; font-weight: 500; color: #f4f4f5; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.wk-note { font-size: 10.5px; color: #71717a; margin-top: 1px; }
+.wk-flow { text-align: right; font-size: 12px; font-weight: 600; flex-shrink: 0; }
+
+/* ---- синхронизация устройств ---- */
+.sync-state { font-size: 12px; color: #a1a1aa; line-height: 1.6; }
+.sync-state b { color: var(--gold); }
+.sync-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.sync-actions .btn-lime, .sync-actions .btn-ghost { width: auto; }
+
+/* ============================================================
+   МОБИЛЬНЫЙ ИНТЕРФЕЙС — полный редизайн (удобство одной рукой)
+   ============================================================ */
+
+@media (max-width: 1023px) {
+
+  /* ---- каркас ---- */
+  .content { padding: 12px 12px calc(96px + env(safe-area-inset-bottom)); }
+  .stack { gap: 14px; }
+  .stack-16 { gap: 12px; }
+
+  /* статус источника данных — виден и на мобильном (реальный рынок/симуляция) */
+  .desk-topline {
+    display: flex; padding: 7px 14px 9px; border-top: 1px solid var(--border);
+  }
+  .desk-topline .t { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .desk-topline .b { font-size: 11px; flex-shrink: 0; }
+  .mobile-head { backdrop-filter: blur(12px); }
+  .mh-row { padding: 10px 12px; gap: 8px; }
+  .mh-row > .xenoai-logo, .mh-row > span:first-child { min-width: 0; flex-shrink: 1; overflow: hidden; }
+  .mh-chip { max-width: 34vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .btn-menu { padding: 10px; border-radius: 12px; } /* тап ≥ 40px */
+
+  /* ---- нижняя навигация: крупнее, удобнее под большой палец ---- */
+  .bottomnav { padding-bottom: max(env(safe-area-inset-bottom), 4px); box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.45); }
+  .bn-item { gap: 3px; padding: 9px 0 7px; font-size: 10px; min-height: 54px; }
+  .bn-item svg { width: 22px; height: 22px; }
+  .bn-item.active { color: var(--accent-2); }
+
+  /* шторка меню: шире, пункты крупнее */
+  .drawer { width: min(320px, 88vw); padding: 18px 16px calc(18px + env(safe-area-inset-bottom)); }
+  .drawer nav .nav-item { padding: 13px 12px; font-size: 14.5px; }
+
+  /* ---- страницы ---- */
+  .page-title { font-size: 20px; }
+  .page-sub { font-size: 12px; }
+  .card { border-radius: 18px; }
+  .card-pad { padding: 13px; }
+  .section-title { font-size: 14px; }
+
+  /* статкарточки */
+  .stat-grid { grid-template-columns: repeat(2, 1fr); gap: 9px; }
+  .stat-card { padding: 12px; border-radius: 14px; }
+  .stat-label { font-size: 11.5px; }
+  .stat-value { font-size: 20px; }
+  .stat-sub { font-size: 10.5px; }
+
+  /* ---- строки-списки: больше воздуха, все тапы ≥ 40px ---- */
+  .row { padding: 11px 6px; }
+  .row-title { font-size: 13px; }
+  .row-sub { font-size: 11px; }
+
+  /* сигналы: кнопка на всю строку снизу, цифры рядом */
+  .sig-row { padding: 12px 12px; gap: 10px; }
+  .sig-row > :last-child {
+    flex-direction: row !important; width: 100%;
+    align-items: center; justify-content: space-between; gap: 8px;
+    margin-top: 2px;
+  }
+  .sig-row .btn-take { flex: 1; padding: 11px 12px; font-size: 13px; text-align: center; }
+  .sig-row .link-btn { padding: 8px 4px; }
+  .sig-note { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+
+  /* киты */
+  .wrow { padding: 11px 12px; gap: 8px; }
+  .wrow .amt { font-size: 12.5px; }
+  .wk-row { padding: 10px 0; }
+  .wk-flow { font-size: 11px; }
+
+  /* события */
+  .ev-row { padding: 13px 12px; gap: 10px; }
+  .ev-title { font-size: 13.5px; }
+
+  /* лидеры */
+  .lead-row { padding: 12px 12px; }
+
+  /* ---- рынок ---- */
+  .mkt-head { padding: 12px 14px; }
+  .mkt-price { font-size: 20px; }
+  .mkt-tools { padding: 8px 10px; gap: 6px; }
+  .toggle-pill { padding: 9px 13px; font-size: 12px; }
+  .tfbar button { padding: 8px 13px; font-size: 12px; }
+  .chart-ph { height: 300px; }
+  .mover { padding: 11px 14px; }
+
+  /* ---- форма сделки + блок ИИ ---- */
+  .tform { padding: 11px; border-radius: 18px; }
+  .chip { padding: 10px 14px; font-size: 12.5px; min-height: 40px; } /* тап-таргет */
+  .chip-row { gap: 6px; scrollbar-width: none; }
+  .chip-row::-webkit-scrollbar { display: none; }
+  .seg-btn { padding: 12px 0; font-size: 13.5px; }
+  .inp { padding: 12px 12px 12px 38px; border-radius: 13px; }
+  .btn-open { padding: 14px 0; font-size: 14.5px; border-radius: 14px; }
+  .tform-stats { font-size: 10.5px; }
+  .tform-note { font-size: 10px; }
+
+  .ai-block { padding: 11px; border-radius: 16px; }
+  .ai-cta { padding: 12px 0; font-size: 13.5px; }
+  .ai-open { padding: 13px 0; font-size: 13.5px; }
+  .ai-help { font-size: 11px; }
+  .ai-limit-row { gap: 6px; }
+  .limit-chip { padding: 8px 12px; font-size: 11.5px; min-height: 36px; }
+  .ai-limit-row .custom-wrap .inp { width: 64px; padding: 8px 20px 8px 10px; font-size: 14px; }
+  .limit-apply { padding: 9px 13px; font-size: 12px; }
+  .ai-auto-pill { padding: 8px 12px; font-size: 11px; }
+  .ai-session .row { font-size: 11px; }
+  .glm-row { padding: 9px 10px; }
+  .glm-row .link-btn { padding: 8px 2px; }
+
+  /* мозг ИИ: строка весов сжимается под узкий экран */
+  .brain-stats { grid-template-columns: repeat(2, 1fr); }
+  .brain-row .lbl { width: 92px; font-size: 10.5px; }
+  .brain-row .val { width: 26px; }
+  .brain-row .num[style*="width:44px"] { width: 38px !important; }
+  .brain-lesson { font-size: 11px; }
+
+  /* ---- модалки = шторки на весь экран ---- */
+  .modal-wrap { align-items: flex-end; }
+  .modal {
+    max-height: 94dvh; border-radius: 18px 18px 0 0;
+    padding-bottom: max(env(safe-area-inset-bottom), 14px);
+  }
+  .modal.wide { max-width: 100%; }
+  .modal-x { padding: 10px; top: 10px; right: 10px; }
+  .cab-head { padding: 18px 16px 14px; }
+  .cab-body { padding: 14px 16px; }
+  .cab-balance { font-size: 26px; }
+  .cab-stats { padding: 14px 16px; }
+  .cab-foot { flex-direction: column; align-items: stretch; padding: 14px 16px calc(16px + env(safe-area-inset-bottom)); }
+  .cab-foot div { justify-content: space-between; }
+  .cab-foot .btn-ghost { flex: 1; padding: 12px 10px; text-align: center; }
+  .notify-row { padding: 12px; }
+  .nr-sw { width: 44px; height: 26px; }
+  .nr-sw i { width: 22px; height: 22px; }
+  .notify-row.on .nr-sw i { transform: translateX(18px); }
+  .btn-ghost { padding: 11px 14px; }
+
+  /* ---- реальный рынок ---- */
+  .mode-seg { grid-template-columns: repeat(2, 1fr); }
+  .mode-btn { padding: 10px 0; font-size: 12.5px; }
+  .lm-card { padding: 13px; }
+  .lm-btn { padding: 12px 0; font-size: 13.5px; }
+
+  /* тосты: не перекрывают нижнюю навигацию, шире на узких экранах */
+  #toast-root { left: 12px; right: 12px; bottom: calc(74px + env(safe-area-inset-bottom)); }
+  .toast { min-width: 0; max-width: none; width: 100%; }
+
+  /* экран входа: ничего не обрезается на маленьких телефонах */
+  .auth { padding: 28px 14px; justify-content: flex-start; padding-top: max(28px, env(safe-area-inset-top)); }
+  .auth-logo { margin-bottom: 18px; }
+  .auth-brand .b1 { font-size: 20px; }
+  .auth-card { padding: 16px; }
+  .auth-inp { font-size: 16px !important; padding: 12px 14px; } /* крупный тап + без зума iOS */
+  .btn-enter { padding: 13px 0; font-size: 14.5px; }
+
+  /* прогноз ИИ */
+  .fc-eta { grid-template-columns: repeat(2, 1fr); }
+  .fc-box { font-size: 11.5px; }
+}
+
+/* очень узкие экраны (<360px): одна колонка статкарточек */
+@media (max-width: 359px) {
+  .stat-grid { grid-template-columns: 1fr; }
+  .wgrid { grid-template-columns: 1fr; }
+  .brain-row .lbl { width: 84px; }
+}
+
+/* горизонтальный телефон: нижняя навигация компактнее */
+@media (max-width: 1023px) and (orientation: landscape) {
+  .bottomnav .bn-item { flex-direction: row; gap: 6px; min-height: 44px; padding: 6px 0; }
+  .bottomnav .bn-item svg { width: 18px; height: 18px; }
+  .content { padding-bottom: calc(56px + env(safe-area-inset-bottom)); }
+}

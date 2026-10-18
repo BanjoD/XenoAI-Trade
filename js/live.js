@@ -81,7 +81,7 @@ const Live = (() => {
     method = method.toUpperCase();
     if (exchange === "binance") {
       const host = "https://api.binance.com";
-      const q = (query || "") + (query ? "&" : "") + `timestamp=${ts}&recvWindow=5000`;
+      const q = (query || "") + (query ? "&" : "") + `timestamp=${ts + binanceOffset()}&recvWindow=5000`;
       const sig = await hmacHex(creds.secret, q);
       const url = `${host}${path}?${q}&signature=${sig}`;
       const res = await fetch(url, {
@@ -89,7 +89,7 @@ const Live = (() => {
         body: body ? JSON.stringify(body) : undefined, cache: "no-store",
       });
       const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json.msg || ("Binance HTTP " + res.status));
+      if (!res.ok) throw new Error(xplain("binance", json.msg || ("Binance HTTP " + res.status), json.code));
       return json;
     }
     if (exchange === "bybit") {
@@ -109,15 +109,17 @@ const Live = (() => {
         body: method === "POST" ? JSON.stringify(body || {}) : undefined,
       });
       const json = await res.json().catch(() => ({}));
-      if (json.retCode !== 0) throw new Error(json.retMsg || ("Bybit " + res.status));
+      if (json.retCode !== 0) throw new Error(xplain("bybit", json.retMsg || ("Bybit " + res.status), json.retCode));
       return json;
     }
     if (exchange === "okx") {
       const host = "https://www.okx.com";
-      const iso = new Date(ts).toISOString();
+      // подпись OKX: GET — путь ВМЕСТЕ со строкой запроса; POST — путь + тело
+      const fullPath = query ? path + "?" + query : path;
+      const iso = new Date(ts + okxOffset()).toISOString();
       const bodyStr = body ? JSON.stringify(body) : "";
-      const sign = await hmacB64(creds.secret, iso + method + path + bodyStr);
-      const res = await fetch(host + path, {
+      const sign = await hmacB64(creds.secret, iso + method + fullPath + bodyStr);
+      const res = await fetch(host + fullPath, {
         method, cache: "no-store",
         headers: {
           "OK-ACCESS-KEY": creds.key, "OK-ACCESS-SIGN": sign, "OK-ACCESS-TIMESTAMP": iso,
@@ -126,10 +128,57 @@ const Live = (() => {
         body: body ? bodyStr : undefined,
       });
       const json = await res.json().catch(() => ({}));
-      if (json.code !== "0") throw new Error((json.data && json.data[0] && json.data[0].msg) || json.msg || ("OKX " + res.status));
+      if (json.code !== "0") {
+        const code = json.data && json.data[0] && json.data[0].sCode || (json.data && json.data[0] && json.data[0].code);
+        const raw = (json.data && json.data[0] && (json.data[0].msg || json.data[0].sMsg)) || json.msg || ("OKX " + res.status);
+        // 50102 — расхождение часов: корректируем смещение по серверному времени и повторяем ОДИН раз
+        if (String(code) === "50102") {
+          await syncOkxTime();
+          throw new Error(xplain("okx", raw, code) + " — время синхронизировано с сервером OKX, повторите запрос");
+        }
+        throw new Error(xplain("okx", raw, code));
+      }
       return json;
     }
     throw new Error("Неизвестная биржа");
+  }
+
+  // ---------- расшифровка ошибок бирж + авто-коррекция времени ----------
+  // Часы устройства могут расходиться с сервером — тогда подпись «из будущего/прошлого»
+  // отвергается. Раз в сессию спрашиваем серверное время OKX/Binance и дальше подписываем
+  // с поправкой. Понятные тексты вместо голых кодов — чтобы пользователь знал, что чинить.
+  let okxOffsetMs = 0, binanceOffsetMs = 0, offsetSynced = false;
+  function okxOffset() { return okxOffsetMs; }
+  function binanceOffset() { return binanceOffsetMs; }
+  async function syncOkxTime() {
+    try {
+      const r = await fetch("https://www.okx.com/api/v5/public/time", { cache: "no-store" });
+      const j = await r.json();
+      const srv = Number(j.data && j.data[0] && j.data[0].ts);
+      if (srv > 0) { okxOffsetMs = srv - Date.now(); offsetSynced = true; }
+    } catch (e) { /* нет сети — подписываем локальным временем */ }
+  }
+  async function syncBinanceTime() {
+    try {
+      const r = await fetch("https://api.binance.com/api/v3/time", { cache: "no-store" });
+      const j = await r.json();
+      if (j && j.serverTime > 0) { binanceOffsetMs = j.serverTime - Date.now(); offsetSynced = true; }
+    } catch (e) { /* нет сети */ }
+  }
+  function xplain(exchange, msg, code) {
+    const c = String(code == null ? "" : code);
+    const m = String(msg || "");
+    const map = [
+      [/50111|-2015|-2014|API.*invalid|Invalid API-key/i, "ключ не принят: проверьте API-ключ и что он действует (не удалён, не истёк, совпадает биржа)", ],
+      [/50112|50113|passphrase/i, "неверная парольная фраза (passphrase) — та, что вы задали ПРИ СОЗДАНИИ ключа на OKX"],
+      [/50102|-1021|timestamp/i, "расхождение времени устройства с сервером биржи"],
+      [/33009|-2019|margin|insufficient/i, "недостаточно средств на бирже для операции"],
+      [/51000|51001|instId|instrument/i, "инструмент не найден на этой бирже (проверьте пару, например BTC-USDT)"],
+      [/permission|not.*allow|denied/i, "у ключа нет нужного права: включите «Чтение» (и «Торговля» для ордеров) при создании ключа"],
+      [/IP|white|restricted|region/i, "биржа ограничила доступ с этого IP/региона — добавьте IP в белый список ключа"],
+    ];
+    for (const [re, txt] of map) if (re.test(m) || (c && re.test(c))) return txt + " [" + (c || exchange) + "]";
+    return m;
   }
 
   // ================= кошелёк (EIP-1193) =================
@@ -199,7 +248,7 @@ const Live = (() => {
   function disconnect() {
     state.conn = null;
     state.wallet = null;
-    if (state.keys) state.keys.tested = state.keys.tested; // ключи остаются сохранёнными, но не активны
+    state.__creds = null; // подписанные запросы без активного подключения невозможны
     emit();
   }
 
@@ -212,6 +261,12 @@ const Live = (() => {
   }
 
   async function testKeys(creds) {
+    // перед первым подписанным запросом синхронизируем время с биржей —
+    // защищает от «подпись из будущего» при расхождении часов устройства
+    if (!offsetSynced) {
+      if (creds.exchange === "okx") await syncOkxTime();
+      if (creds.exchange === "binance") await syncBinanceTime();
+    }
     const res = await readBalance(creds.exchange, creds);
     state.keys = { exchange: creds.exchange, apiKeyMasked: maskKey(creds.key), tested: true };
     persistKeys();

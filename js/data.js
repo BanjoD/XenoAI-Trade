@@ -27,6 +27,11 @@ const DataLib = (() => {
     { sym: "EIGEN", pair: "EIGENUSDT", color: "#1b1b4d", label: "E", name: "eigenlayer" },
     { sym: "KAITO", pair: "KAITOUSDT", color: "#111111", label: "K", name: "kaito" },
     { sym: "MNT", pair: "MNTUSDT", color: "#00c48c", label: "M", name: "mantle" },
+    // GRAM — оригинальный Toncoin из сети The Open Network («бывшая TON»).
+    // Торгуется на всех трёх биржах как TON/USDT: цена, свечи и лента китов —
+    // обычный биржевой путь каскада Binance → Bybit → OKX. Символ GRAM —
+    // фирменное название платформы, pair указывает на реальную биржевую пару.
+    { sym: "GRAM", pair: "TONUSDT", color: "#0098ea", label: "G", name: "toncoin" },
   ];
 
   const BY_SYM = {};
@@ -57,7 +62,7 @@ const DataLib = (() => {
     BTC: 81315, ETH: 2388, SOL: 102.5, XRP: 1.279, BNB: 716.5, NEAR: 4.76, SUI: 0.964,
     ARB: 0.18, TAO: 263, LINK: 11.83, UNI: 7.12, ZEC: 1110, ONDO: 0.43, ENA: 0.183,
     PHA: 0.0498, JUP: 0.283, FET: 0.188, ZRO: 1.76, LTC: 59, QNT: 191.7,
-    GRASS: 0.585, EIGEN: 0.233, KAITO: 0.275, MNT: 0.525,
+    GRASS: 0.585, EIGEN: 0.233, KAITO: 0.275, MNT: 0.525, GRAM: 1.28,
   };
 
   function seedSpark(price, seed) {

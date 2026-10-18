@@ -32,10 +32,21 @@ const App = (() => {
   const BASE_TITLE = "XenoAI Trade — платформа автоматического ИИ-трейдинга";
   let hashNav = false;
   function isHttp() { return location.protocol === "http:" || location.protocol === "https:"; }
+  // База размещения: "" в корне домена (Vercel) или "/имя-репо" на GitHub Pages
+  // (проектная страница живёт в подпапке). Глубокая ссылка вида /repo/signals —
+  // после 404.html-фолбэка — распознаётся: имя вкладки откусывается от пути.
+  const BASE = (() => {
+    if (!isHttp()) return "";
+    let p = location.pathname;
+    const m = p.match(/\/([a-z]{3,10})\/?$/i);
+    if (m && VIEW_IDS.indexOf(m[1].toLowerCase()) !== -1) p = p.slice(0, p.length - m[0].length);
+    return p.replace(/\/+$/, "");
+  })();
   function viewFromUrl() {
     let v = "";
     if (isHttp()) {
-      const m = location.pathname.match(/^\/([a-z]{3,10})\/?$/i);
+      const rel = BASE ? (location.pathname.slice(BASE.length) || "/") : location.pathname;
+      const m = rel.match(/^\/([a-z]{3,10})\/?$/i);
       if (m) v = m[1].toLowerCase();
     }
     if (!v && location.hash) {
@@ -47,7 +58,7 @@ const App = (() => {
   function applyUrl(v) {
     try {
       if (isHttp()) {
-        const url = v === "desk" ? "/" : "/" + v;
+        const url = BASE ? (v === "desk" ? BASE + "/" : BASE + "/" + v) : (v === "desk" ? "/" : "/" + v);
         if (location.pathname + location.hash !== url) history.pushState({ view: v }, "", url);
       } else {
         const hh = "#/" + v;
@@ -503,7 +514,9 @@ const App = (() => {
         const bal = Live.balanceUSDT();
         if (bal != null && amt > bal) { h.toast("error", "Недостаточно USDT на бирже", `Доступно: ${Fmt.fmtNum(bal, 2)} USDT`); break; }
         try {
-          const ord = await Live.placeOrder({ sym: DataLib.BY_SYM[f2.sym] ? DataLib.BY_SYM[f2.sym].pair : f2.sym + "USDT", side: f2.side, amountUSDT: amt, price: price2 });
+          const inst2 = DataLib.BY_SYM[f2.sym];
+          const ordPair = inst2 ? (inst2.pair || (f2.sym + "USDT")) : (f2.sym + "USDT");
+          const ord = await Live.placeOrder({ sym: ordPair, side: f2.side, amountUSDT: amt, price: price2 });
           Store.recordLiveOrder({ sym: ord.sym, side: ord.side, amountUSDT: ord.amountUSDT, exchange: ord.exchange }, "маркет");
           h.toast("success", `Ордер отправлен: ${ord.sym} ${ord.side === "лонг" ? "BUY" : "SELL"}`, `${Fmt.fmtNum(amt)} USDT · ${ord.exchange}`);
         } catch (e) {
@@ -530,7 +543,12 @@ const App = (() => {
           h.toast("info", `Собираю свечи ${sym}…`, "Нажмите «Проанализировать» ещё раз через пару секунд");
           break;
         }
-        const res = Engine.aiAnalyze(sym, bars, s.aiBrain, (s.news && s.news.items) || []);
+        const extra = {
+          whale: (s.whales[sym] && s.whales[sym].length) ? null : null, // считаем в Store: aiWhaleBias приватный, здесь — только доп. факторы
+          onchain: (window.WhalesDB && WhalesDB.bias) ? WhalesDB.bias(sym) : null,
+          glm: (window.GLM && GLM.factor) ? GLM.factor(sym) : null,
+        };
+        const res = Engine.aiAnalyze(sym, bars, s.aiBrain, (s.news && s.news.items) || [], extra);
         if (!res) { h.toast("error", "Недостаточно данных для анализа", "Попробуйте ещё раз через несколько секунд"); break; }
         s._ai = { sym, res, ts: Date.now() };
         if (res.verdict === "wait") h.toast("info", "ИИ: сейчас входа нет", "Факторы разнонаправлены — лучше подождать");
@@ -543,19 +561,30 @@ const App = (() => {
         if (!s._ai || s._ai.res.verdict === "wait") { h.toast("error", "Сначала запустите ИИ-анализ", "Кнопка «Проанализировать» в форме сделки"); break; }
         const r = s._ai.res;
         if (Date.now() - s._ai.ts > 240000) { h.toast("info", "Расчёт устарел", "Пересчитайте вердикт ИИ"); break; }
-        const size = Math.min(1000, Math.max(200, Math.round(s.balance * 0.1)), Math.round(s.balance));
-        if (size < 200) { h.toast("error", "Недостаточно хрювен", "Минимум для ИИ-сделки — 200 ХРЮ. Пополните счёт в кабинете"); break; }
-        const out = Store.placeDemo({ sym: r.sym, side: r.verdict, size, lev: 1, stop: r.stop, target: r.target, strategy: "ai", ai: { confidence: r.confidence, note: r.note, factors: r.factors, score: r.score } });
+        // не догонять поезд: цена ушла от расчёта больше чем на 60% риска — пересчитать
+        const curPx = (s.prices[r.sym] && s.prices[r.sym].price) || r.price;
+        const driftPct = Math.abs(curPx - r.price) / r.price * 100;
+        if (driftPct > (r.riskPct || 1) * 0.6) { h.toast("info", "Цена ушла от расчёта", `сигнал строился по ${Fmt.fmtPrice(r.price)}, сейчас ${Fmt.fmtPrice(curPx)} — пересчитайте вердикт`); break; }
+        const sc = Store.aiSizeCalc();
+        if (sc.size <= 0) { h.toast("error", "Размер не проходит по лимитам", `${sc.why} — поднимите лимиты в настройках ИИ или пополните счёт`); break; }
+        const out = Store.placeDemo({ sym: r.sym, side: r.verdict, size: sc.size, lev: 1, stop: r.stop, target: r.target, strategy: "ai", ai: { confidence: r.confidence, note: r.note, factors: r.factors, score: r.score } });
         if (!out.ok) { h.toast("error", out.error); break; }
-        h.toast("success", `ИИ-сделка открыта: ${r.sym} ${r.verdict}`, `${Fmt.fmtNum(size)} ХРЮ · уверенность ${r.confidence}% · списано со счёта`);
+        h.toast("success", `ИИ-сделка открыта: ${r.sym} ${r.verdict}`, `${Fmt.fmtNum(sc.size)} ХРЮ · уверенность ${r.confidence}% · списано со счёта`);
         break;
       }
 
       // ИИ-автопилот и сканер
-      case "ai:auto":
+      case "ai:auto": {
+        // в реальном режиме автопилот по умолчанию ВЫКЛ; включение — только явным
+        // подтверждением риска (требование безопасности реального рынка)
+        if (s.mode === "live" && !s.aiAutoLive) {
+          const sure = confirm("Включить автопилот в РЕАЛЬНОМ режиме?\n\nИИ будет самостоятельно открывать и закрывать сделки-симуляции на реальных ценах (входы списывают виртуальные ХРЮ, реальные ордера по-прежнему отправляются только вручную). Авто-стоп сессии защитит лимитом ±" + (s.aiThreshold || 50) + "%.\n\nПродолжить?");
+          if (!sure) break;
+        }
         Store.toggleAiAuto();
         renderView();
         break;
+      }
       // лимит авто-стопа сессии ИИ (±%): пресеты и свой ввод
       case "ai:limit": {
         const out = Store.setAiThreshold(Number(arg));
@@ -573,15 +602,50 @@ const App = (() => {
         renderView();
         break;
       }
+      // максимум одновременных ИИ-позиций: АВТО из лимитов или ручной 1..8
+      case "ai:maxpos": {
+        const mpOut = Store.setAiPosMode(arg === "auto" ? "auto" : Number(arg));
+        if (!mpOut.ok) { h.toast("error", mpOut.error); break; }
+        if (arg === "auto") h.toast("success", `ИИ-позиций: АВТО · ${Store.autoMaxPos()}`, `считается из лимитов: ${Fmt.fmtNum(Store.aiTotalCap())} ÷ ${Fmt.fmtNum(Store.aiDealCap())} = до ${Store.autoMaxPos()} одновременных сделок`);
+        else h.toast("success", `Ручной лимит ИИ-позиций: ${arg}`, `автопилот будет держать в рынке не больше ${arg} сделок одновременно`);
+        renderView();
+        break;
+      }
+      // лимит суммы одной сделки (ХРЮ ≈ $)
+      case "ai:deal": {
+        const di = document.getElementById("ai-deal-input");
+        const dealOut = Store.setMaxDeal(di ? di.value : NaN);
+        if (!dealOut.ok) { h.toast("error", dealOut.error, "Введите сумму от 5 до 100 000 ХРЮ"); break; }
+        h.toast("success", `Максимум одной сделки: ${Fmt.fmtNum(Store.aiDealCap())} ХРЮ (≈ $${Fmt.fmtNum(Store.aiDealCap())})`, `одновременных ИИ-позиций теперь до ${Store.autoMaxPos()} (авто из лимитов)`);
+        renderView();
+        break;
+      }
+      // суммарный лимит всех сделок (ХРЮ ≈ $)
+      case "ai:total": {
+        const ti = document.getElementById("ai-total-input");
+        const totOut = Store.setMaxTotal(ti ? ti.value : NaN);
+        if (!totOut.ok) { h.toast("error", totOut.error, `минимум — лимит одной сделки (${Fmt.fmtNum(Store.aiDealCap())} ХРЮ)`); break; }
+        h.toast("success", `Суммарный лимит сделок: ${Fmt.fmtNum(Store.aiTotalCap())} ХРЮ (≈ $${Fmt.fmtNum(Store.aiTotalCap())})`, `одновременных ИИ-позиций теперь до ${Store.autoMaxPos()} · чем больше сумма — тем больше параллельных входов`);
+        renderView();
+        break;
+      }
+      // карточка прогноза: на чём основана уверенность ИИ в сигнале/идее
+      case "sig:forecast":
+        h.showModal(Views.signalForecast(arg), { wide: true });
+        break;
       case "ai:open-idea": {
         const idea = (s.aiIdeas || []).find((i) => i.sym === arg);
         if (!idea || idea.res.verdict === "wait") { h.toast("error", "Идея устарела — подождите пересчёта"); break; }
         if (!Store.canTrade()) { h.toast("error", "Сделки может открывать только аккаунт David или Yura"); break; }
-        const sz = Math.min(1000, Math.max(200, Math.round(s.balance * 0.1)), Math.round(s.balance));
-        if (sz < 200) { h.toast("error", "Недостаточно хрювен", "Пополните демо-счёт в кабинете"); break; }
-        const ideaOut = Store.placeDemo({ sym: idea.sym, side: idea.res.verdict, size: sz, lev: 1, stop: idea.res.stop, target: idea.res.target, strategy: "ai", ai: { confidence: idea.res.confidence, note: idea.res.note, factors: idea.res.factors, score: idea.res.score } });
+        // не догонять поезд: цена ушла от расчёта больше чем на 60% риска — ждать пересчёта
+        const curIdea = (s.prices[idea.sym] && s.prices[idea.sym].price) || idea.res.price;
+        const driftIdea = Math.abs(curIdea - idea.res.price) / idea.res.price * 100;
+        if (driftIdea > (idea.res.riskPct || 1) * 0.6) { h.toast("info", "Цена ушла от расчёта", `${idea.sym}: сигнал по ${Fmt.fmtPrice(idea.res.price)}, сейчас ${Fmt.fmtPrice(curIdea)} — дождитесь пересчёта`); break; }
+        const szSc = Store.aiSizeCalc();
+        if (szSc.size <= 0) { h.toast("error", "Размер не проходит по лимитам", `${szSc.why} — поднимите лимиты или пополните счёт`); break; }
+        const ideaOut = Store.placeDemo({ sym: idea.sym, side: idea.res.verdict, size: szSc.size, lev: 1, stop: idea.res.stop, target: idea.res.target, strategy: "ai", ai: { confidence: idea.res.confidence, note: idea.res.note, factors: idea.res.factors, score: idea.res.score } });
         if (!ideaOut.ok) { h.toast("error", ideaOut.error); break; }
-        h.toast("success", `Идея ИИ взята: ${idea.sym} ${idea.res.verdict}`, `${Fmt.fmtNum(sz)} ХРЮ · уверенность ${idea.res.confidence}%`);
+        h.toast("success", `Идея ИИ взята: ${idea.sym} ${idea.res.verdict}`, `${Fmt.fmtNum(szSc.size)} ХРЮ · уверенность ${idea.res.confidence}%`);
         break;
       }
 
@@ -589,10 +653,12 @@ const App = (() => {
       case "sig:take": {
         if (!Store.canTrade()) { h.toast("error", "Сделки может открывать только аккаунт David или Yura"); break; }
         const sym = arg;
-        if (s.balance < 500) { h.toast("error", "Недостаточно хрювен", "Нужно 500 ХРЮ — пополните демо-счёт в кабинете"); break; }
-        const sigOut = Store.placeDemo({ sym, side: "лонг", size: 500, lev: 1 });
+        // размер сигнала — 500 ХРЮ, но не выше лимитов счёта (одна сделка / суммарный)
+        const sigSize = Math.min(500, Store.aiDealCap(), Math.round(Store.aiTotalRemain()), Math.round(s.balance));
+        if (sigSize < 10) { h.toast("error", "Сделка не влезает в лимиты", Store.aiTotalRemain() < 10 ? "суммарный лимит исчерпан — закройте часть сделок" : s.balance < 10 ? "пополните демо-счёт в кабинете" : `лимит одной сделки — ${Fmt.fmtNum(Store.aiDealCap())} ХРЮ`); break; }
+        const sigOut = Store.placeDemo({ sym, side: "лонг", size: sigSize, lev: 1 });
         if (!sigOut.ok) { h.toast("error", sigOut.error); break; }
-        h.toast("success", `Сигнал взят в демо: ${sym}`, `500 ХРЮ списаны со счёта · цена ${Fmt.fmtPrice((s.prices[sym] && s.prices[sym].price) || 0)}`);
+        h.toast("success", `Сигнал взят в демо: ${sym}`, `${Fmt.fmtNum(sigSize)} ХРЮ списаны со счёта · цена ${Fmt.fmtPrice((s.prices[sym] && s.prices[sym].price) || 0)}`);
         break;
       }
 
@@ -725,6 +791,120 @@ const App = (() => {
       // счета
       case "account:auto": Store.toggleAuto(); break;
 
+      // ---------- синхронизация устройств + файловый бэкап ----------
+      case "sync:enable-new": {
+        const r1 = Store.enableSync("");
+        if (!r1.ok) { h.toast("error", r1.error); break; }
+        h.toast("success", "Синхронизация включена", `код ${r1.code} — введите его на других устройствах в Кабинете`);
+        h.showModal(ViewsTrade.cabinet(), {});
+        break;
+      }
+      case "sync:enable-code": {
+        const inp = document.getElementById("sync-code-inp");
+        const code = inp ? inp.value : "";
+        if (!String(code).trim()) { h.toast("error", "Введите код с другого устройства"); break; }
+        const r2 = Store.enableSync(code);
+        if (!r2.ok) { h.toast("error", r2.error); break; }
+        h.toast("success", "Подключено к облачному архиву", `код ${r2.code} · архив подтянется в течение минуты`);
+        h.showModal(ViewsTrade.cabinet(), {});
+        break;
+      }
+      case "sync:now": {
+        h.toast("info", "Синхронизирую…", "пуш и пул полного архива аккаунта");
+        Store.syncPush();
+        Store.syncPull().then((changed) => {
+          h.toast(changed ? "success" : "info", changed ? "Архив обновлён из облака" : "Уже актуально", changed ? "история объединена без потерь" : "локальные данные новее или совпадают");
+          h.showModal(ViewsTrade.cabinet(), {});
+        });
+        break;
+      }
+      case "sync:disable":
+        Store.disableSync();
+        h.toast("info", "Синхронизация выключена");
+        h.showModal(ViewsTrade.cabinet(), {});
+        break;
+      case "sync:copy": {
+        const info = Store.syncInfo();
+        const txt = info.code || "";
+        const done = () => h.toast("success", "Код скопирован", txt + " — вставьте его в Кабинете на другом устройстве");
+        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done, done);
+        else done();
+        break;
+      }
+      case "backup:export": {
+        const data = Store.exportBackup();
+        const blob = new Blob([JSON.stringify(data, null, 1)], { type: "application/json" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        const u = Auth.readSession();
+        a.download = `xenoai-backup-${u ? u.login.toLowerCase() : "account"}-${new Date().toISOString().slice(0, 10)}.json`;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 400);
+        h.toast("success", "Архив скачан", "полный снимок аккаунта: баланс, позиции, вся история");
+        break;
+      }
+      case "backup:import": {
+        const fi = document.getElementById("backup-file");
+        if (!fi) break;
+        if (!fi.dataset.bound) {
+          fi.dataset.bound = "1";
+          fi.addEventListener("change", () => {
+            const file = fi.files && fi.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+              const res = Store.importBackup(String(reader.result || ""));
+              if (res.ok) h.toast("success", "Архив восстановлен", "история объединена без потерь");
+              else h.toast("error", "Файл не принят", res.error);
+              h.showModal(ViewsTrade.cabinet(), {});
+            };
+            reader.readAsText(file);
+            fi.value = "";
+          });
+        }
+        fi.click();
+        break;
+      }
+
+      // ---------- GLM-аналитик (13-й фактор) ----------
+      case "glm:open": h.showModal(ViewsTrade.glmModal(), {}); break;
+      case "glm:preset": {
+        const pr = GLM.setPreset(arg);
+        if (!pr.ok) { h.toast("error", pr.error); break; }
+        h.showModal(ViewsTrade.glmModal(), {});
+        break;
+      }
+      case "glm:save": {
+        const keyEl = document.getElementById("glm-key");
+        const modEl = document.getElementById("glm-model");
+        const res = GLM.save({ apiKey: keyEl ? keyEl.value : "", model: modEl ? modEl.value : "", on: true });
+        if (!res.ok) { h.toast("error", res.error); break; }
+        h.toast("success", "GLM подключён", "языковая модель теперь 13-й фактор ансамбля · вердикт появится в течение минуты");
+        h.showModal(ViewsTrade.glmModal(), {});
+        renderView();
+        break;
+      }
+      case "glm:off": {
+        GLM.save({ on: false });
+        h.toast("info", "Фактор GLM выключен", "12 рыночных факторов работают как раньше");
+        h.showModal(ViewsTrade.glmModal(), {});
+        renderView();
+        break;
+      }
+      case "glm:test": {
+        const keyEl2 = document.getElementById("glm-key");
+        const modEl2 = document.getElementById("glm-model");
+        if (keyEl2 && keyEl2.value.trim()) GLM.save({ apiKey: keyEl2.value, model: modEl2 ? modEl2.value : "" });
+        h.toast("info", "Спрашиваю GLM…", "запрос к модели с текущей сводкой рынка");
+        GLM.ask().then((v) => {
+          if (v.status === "ok") h.toast("success", `GLM: ${v.bias === "flat" ? "вне рынка" : v.bias} ${v.confidence}%`, v.reasoning || "");
+          else h.toast("error", "GLM не ответил", v.error || "проверьте ключ и модель");
+          h.showModal(ViewsTrade.glmModal(), {});
+        });
+        break;
+      }
+
       // авторизация
       case "auth:tab": Auth.setTab(arg); renderAuth(); break;
       case "auth:eye": Auth.toggleEye(); Auth.readInputs(); renderAuth(); break;
@@ -800,7 +980,37 @@ const App = (() => {
   }
 
   // ---------- загрузка ----------
+  function bindGlobalGuards() {
+    // самодиагностика: любые ошибки платформы попадают в ленту событий (и в консоль) —
+    // ничего не ломается молча, состояние не сбрасывается
+    window.addEventListener("error", (e) => {
+      if (window.Store && Store.state && Store.state.started) {
+        try { Store._diagError("окно", e.error || e.message); } catch (x) { /* noop */ }
+      }
+    });
+    window.addEventListener("unhandledrejection", (e) => {
+      if (window.Store && Store.state && Store.state.started) {
+        try { Store._diagError("сеть/промисы", e.reason); } catch (x) { /* noop */ } 
+      }
+    });
+    // несколько вкладок одного аккаунта: изменение в другой вкладке подтягивается сюда
+    window.addEventListener("storage", (e) => {
+      if (!window.Store || !Store.state.started) return;
+      const login = Auth.sessionLogin();
+      const key = login ? `xenoai_v3_${login.toLowerCase()}` : "";
+      if (!key || e.key !== key || !e.newValue) return;
+      try {
+        const d = JSON.parse(e.newValue);
+        if (typeof d.rev === "number" && d.rev > (Store.state.rev || 0)) {
+          Store._applyArchive(d);
+          Store.emit();
+        }
+      } catch (err) { /* битый кадр — игнор */ }
+    });
+  }
+
   function boot() {
+    bindGlobalGuards();
     bindEvents();
     Store.subscribe(scheduleRender);
     if (window.Live) Live.onChange(() => { scheduleRender(); });
@@ -828,6 +1038,9 @@ const App = (() => {
     } else {
       renderAuth();
     }
+    // ончейн-база китов + GLM-аналитик: фоновые опросы стартуют вместе с платформой
+    if (window.WhalesDB && WhalesDB.start) WhalesDB.start();
+    if (window.GLM && GLM.start) GLM.start();
   }
 
   return { boot, navigate, renderAuth, renderView, afterLogin, updateShell };

@@ -134,7 +134,7 @@ const Views = (() => {
   function brainCard(s) {
     const b = s.aiBrain || {};
     const base = Engine.AI_BASE_WEIGHTS;
-    const labels = { trend: "Тренд · EMA50", rsi: "RSI(14)", macd: "MACD", bb: "Боллинджер", ichi: "Ишимоку", vol: "Объём", roc: "Импульс ROC", news: "Новостной фон" };
+    const labels = { trend: "Тренд · EMA50", rsi: "RSI(14)", macd: "MACD", bb: "Боллинджер", ichi: "Ишимоку", vol: "Объём", roc: "Импульс ROC", news: "Новостной фон", adx: "ADX · тренд", stoch: "Стохастик", htf: "Старший ТФ", whale: "Киты · поток", glm: "GLM · ИИ-модель" };
     const weightRows = Object.keys(base).map((k) => {
       const b0 = base[k];
       const cur = b.weights && b.weights[k] != null ? b.weights[k] : b0;
@@ -278,7 +278,10 @@ const Views = (() => {
               <div class="num" style="font-size:13.5px;font-weight:500">${fmtPrice(price)}</div>
               <div class="num ${moved >= 0 ? "text-green" : "text-red"}" style="font-size:11.5px">${moved >= 0 ? "+" : "−"}${Math.abs(moved).toFixed(2)}% к идее</div>
             </div>
-            <button class="btn-take" data-action="ai:open-idea" data-arg="${i.sym}">Открыть в демо</button>
+            <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
+              <button class="link-btn" data-action="sig:forecast" data-arg="idea|${i.sym}" title="Прогноз ИИ: логика, факторы, время до цели">${h.icon("cpu", 12)} прогноз и логика</button>
+              <button class="btn-take" data-action="ai:open-idea" data-arg="${i.sym}">Открыть в демо</button>
+            </div>
           </div>`;
         }).join("") + `</div>`;
 
@@ -316,6 +319,7 @@ const Views = (() => {
             </div>
             <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
               ${h.tag(sig.confidence >= 75 ? "green" : "gray", `уверенность ${sig.confidence}%`)}
+              <button class="link-btn" data-action="sig:forecast" data-arg="sig|${sig.strategy}|${sig.sym}" title="Прогноз ИИ: логика, факторы, время до цели">${h.icon("cpu", 12)} прогноз и логика</button>
               <button class="btn-take" data-action="sig:take" data-arg="${sig.sym}">Взять в демо · ${h.hruAmount(500)}</button>
             </div>
           </div>`;
@@ -328,7 +332,7 @@ const Views = (() => {
           <h1 class="page-title">Сигналы</h1>
           <p class="page-sub">ИИ-сканер по всем монетам + 5 стратегий движка · реальные свечи · спот</p>
         </div>
-        <div class="live-pill hidden-sm">${h.onlineDot()} ${s.aiAuto ? "автопилот вкл" : "автопилот выкл"}</div>
+        <div class="live-pill hidden-sm">${h.onlineDot()} ${s.aiAuto ? "автопилот вкл" : "автопилот выкл"}${s.lastScanAt ? ` · сканер жив · ${Math.max(0, Math.round((Date.now() - s.lastScanAt) / 1000))} с назад` : " · сканер запускается…"}</div>
       </div>
 
       <section class="card card-pad" style="border-color:rgba(255,45,120,.22)">
@@ -338,12 +342,13 @@ const Views = (() => {
         ${scanner}
         <p style="margin-top:10px;font-size:12px;line-height:1.6;color:#71717a">
           ИИ прогоняет через ML-ансамбль все ${DataLib.WATCHLIST.length} монет на каждой свежей свече 15м: тренд к EMA50, MACD, RSI,
-          Боллинджер, Ишимоку, объёмные аномалии, импульс и новостной фон из реальной ленты. Заходит только туда, где видит
-          потенциал и несколько подтверждающих факторов. Скам-защита отсекает низколиквидные и аномальные монеты, новостная
-          защита — монеты под медвежьим информационным давлением. Когда картина факторов разворачивается — ИИ флипает позицию сам:
-          флип — это не стоп-лосс, а осознанный выход, пока цена не дошла до стопа. Чтобы не дёргаться на шуме, позиции младше
-          15 минут не флипаются (кроме просадки глубже −1.5%), после флипа по монете — пауза 45 минут, а разворот требует
-          уверенности не ниже 72%. Сессия автопилота автоматически останавливается при +${s.aiThreshold || 50}% профита или −${s.aiThreshold || 50}% просадки:
+          Боллинджер, Ишимоку, объёмные аномалии, импульс, новостной фон из реальной ленты, силу тренда ADX, стохастик,
+          старший таймфрейм 1ч и поток китов. Заходит только туда, где видит потенциал и одностороннюю картину факторов
+          (согласие ≥ 55% веса). Скам-защита отсекает низколиквидные и аномальные монеты, новостная защита — монеты под
+          медвежьим давлением, гварды волатильности — вспышки и мёртвые рынки. Убыточная позиция флипом не закрывается:
+          разворот — только для защиты прибыли, и только если новый сигнал увереннее входа минимум на 4 п.п.; позиции
+          младше 15 минут не флипаются вовсе, после флипа — пауза 45 минут. Серия из 3 минусов — пауза на 30 минут.
+          Сессия автопилота автоматически останавливается при +${s.aiThreshold || 50}% профита или −${s.aiThreshold || 50}% просадки:
           закрывает все ИИ-сделки по рынку и ждёт возобновления. Лимит настраивается в блоке ИИ на Рынке/в Сделках.
           ${s.aiAuto ? "Автопилот вкл: ИИ входит и флипает на вашем демо-счёте сам." : "Автопилот выкл: входите вручную кнопкой на идее."}
         </p>
@@ -359,8 +364,8 @@ const Views = (() => {
       <section class="card card-pad">
         <div style="margin-bottom:8px;font-size:13.5px;font-weight:600">Как это работает</div>
         <p style="font-size:12.5px;line-height:1.7;color:#71717a">
-          Все данные — спотовый рынок: платформа каждые ~2 секунды подтягивает свежие 15-минутные свечи по 24 инструментам
-          и пересчитывает индикаторы: BB(20,2), облако Ишимоку, MACD(12,26,9), RSI(14), ATR(14) и объёмные аномалии.
+          Все данные — спотовый рынок: платформа каждые ~2 секунды подтягивает свежие 15-минутные свечи по всем ${DataLib.WATCHLIST.length} инструментам
+          (включая GRAM — оригинальный Toncoin из сети The Open Network) и пересчитывает индикаторы: BB(20,2), облако Ишимоку, MACD(12,26,9), RSI(14), ATR(14) и объёмные аномалии.
           Никаких фьючерсов и плеча: «лонг» означает тренд вверх (монета в портфеле), «шорт» — тренд вниз (выход в кэш).
           Стоп и цель считаются от ATR: риск 1.2×ATR, цель — 2R. Сигнал можно взять в демо — сделка исполнится по
           реальной рыночной цене, а результат придёт в хрювнах и долларах (курс 1:1 — плюс/минус одинаков в обеих валютах).
@@ -377,7 +382,7 @@ const Views = (() => {
     const s = S();
     sym = sym || s._whaleSym || "BTC";
     s._whaleSym = sym;
-    const TOP_SYMS = ["BTC", "ETH", "SOL", "XRP", "BNB", "NEAR"];
+    const TOP_SYMS = ["BTC", "ETH", "SOL", "XRP", "BNB", "NEAR", "GRAM"];
     const whalesArr = s.whales[sym] || [];
     const buys = whalesArr.filter((w) => w.side === "buy").reduce((a, w) => a + w.notional, 0);
     const sells = whalesArr.filter((w) => w.side === "sell").reduce((a, w) => a + w.notional, 0);
@@ -387,6 +392,8 @@ const Views = (() => {
     const tabs = `<div class="chip-row scroll">` + TOP_SYMS.map((x) => `
       <button class="chip ${x === sym ? "active" : ""}" data-action="whale:sym" data-arg="${x}">${h.coin(x, 16)} ${x}</button>`).join("") + `</div>`;
 
+    // GRAM (оригинальный Toncoin) торгуется на биржах как TON/USDT — лента китов у него
+    // обычная биржевая (aggTrades), никаких спец-блоков не нужно
     const feed = whalesArr.length === 0
       ? `<div class="empty">Загружаю ленту сделок Binance…</div>`
       : `<div class="rows row-divide">` + whalesArr.slice(0, 20).map((w) => `
@@ -399,12 +406,58 @@ const Views = (() => {
             ${w.notional >= 150000 ? h.tag(w.side === "buy" ? "green" : "red", "МЕГА") : ""}
           </div>`).join("") + `</div>`;
 
+    // ---- ОНЧЕЙН-БАЗА КИТОВ: реальные кошельки + их чистые потоки за 24ч ----
+    const wdb = window.WhalesDB ? WhalesDB.list() : [];
+    const winfo = window.WhalesDB ? WhalesDB.info() : { tracked: 0 };
+    const biasB = window.WhalesDB ? WhalesDB.bias("BTC") : null;
+    const biasE = window.WhalesDB ? WhalesDB.bias("ETH") : null;
+    const ethPx = (s.prices.ETH && s.prices.ETH.price) || 0;
+    const btcPx = (s.prices.BTC && s.prices.BTC.price) || 0;
+    const flowRow = (w) => {
+      const px = w.chain === "BTC" ? btcPx : ethPx;
+      const net = w.net24h || 0;
+      const usd = net * px;
+      const hot = w.lastTs && Date.now() - w.lastTs < 30 * 60000;
+      const big = Math.abs(usd) >= 250000;
+      return `<div class="wk-row">
+        <span class="wk-chain">${w.chain === "BTC" ? "₿" : "Ξ"}</span>
+        <div style="min-width:0;flex:1">
+          <div class="wk-lbl">${h.esc(w.label || w.id)} ${hot ? h.tag(w.net24h > 0 ? "green" : "red", net > 0 ? "накапливает" : "распродаёт") : h.tag("gray", "данные согреваются")}</div>
+          <div class="wk-note">${h.esc(w.note || "")}${w.balance != null && w.chain === "BTC" ? ` · баланс ${Fmt.fmtNum(Math.round(w.balance / 1e8))} BTC` : ""}</div>
+        </div>
+        <div class="wk-flow num ${net > 0 ? "text-green" : net < 0 ? "text-red" : "text-dim"}">
+          ${net ? (net > 0 ? "+" : "−") + (w.chain === "BTC" ? Fmt.fmtNum(Math.abs(net)) + " BTC" : Fmt.fmtNum(Math.abs(net)) + " ETH") : "—"}
+          <span style="font-size:10.5px;opacity:.75;display:block">≈ $${Fmt.fmtNum(Math.round(Math.abs(usd) / 1000))}K / 24ч</span>
+        </div>
+        ${big ? h.tag(net > 0 ? "green" : "red", "СИГНАЛ") : ""}
+      </div>`;
+    };
+    const onchainHtml = `
+    <section class="card card-pad" style="border-color:rgba(255,45,120,.22)">
+      ${h.sectionTitle("Ончейн-киты · база реальных кошельков", `<span class="num" style="font-size:11.5px;color:#8d8a94">${winfo.tracked} кошельков · ${winfo.fresh ? h.onlineDot() + " онлайн" : winfo.lastError ? "обновляем…" : "кэш"}</span>`)}
+      <div class="wk-grid">
+        <div class="wk-stat ${biasB ? (biasB.dir > 0 ? "bull" : "bear") : ""}">
+          <div class="k">Ончейн-сентимент BTC</div>
+          <div class="v">${biasB ? (biasB.dir > 0 ? "НАКОПЛЕНИЕ" : "РАСПРЕДЕЛЕНИЕ") : "нейтрально"}</div>
+          ${biasB ? `<div class="num" style="font-size:11px;color:#a99bb5">${h.esc(biasB.detail)}</div>` : ""}
+        </div>
+        <div class="wk-stat ${biasE ? (biasE.dir > 0 ? "bull" : "bear") : ""}">
+          <div class="k">Ончейн-сентимент ETH</div>
+          <div class="v">${biasE ? (biasE.dir > 0 ? "НАКОПЛЕНИЕ" : "РАСПРЕДЕЛЕНИЕ") : "нейтрально"}</div>
+          ${biasE ? `<div class="num" style="font-size:11px;color:#a99bb5">${h.esc(biasE.detail)}</div>` : ""}
+        </div>
+      </div>
+      <div class="wk-list">${wdb.map(flowRow).join("")}</div>
+      <div class="ai-limit-note">Платформа сама следит за публично известными кошельками через открытые блокчейн-API (mempool.space для BTC, Blockscout для Ethereum) — без ключей. Поток за 24 часа: сколько заведено минус сколько выведено. Перевес накопления/распределения подаётся ИИ как часть фактора «Киты» и усиливает/ослабляет его голос. Подписи кошельков — публичные данные (Arkham/Nansen/Blockscout).</div>
+    </section>`;
+
     const html = `
     <div class="stack">
       <div>
         <h1 class="page-title">Киты</h1>
-        <p class="page-sub">Крупные рыночные сделки ≥ $15 000 · прямая лента aggTrades Binance</p>
+        <p class="page-sub">Лента сделок ≥ $15 000 + ончейн-потоки известных кошельков · факторы ИИ</p>
       </div>
+      ${onchainHtml}
       ${tabs}
       <div class="wgrid">
         <div class="card card-pad">
@@ -436,7 +489,8 @@ const Views = (() => {
       <p class="note">
         Спотовая лента Binance не раскрывает адреса кошельков — это данные биржевого стакана. Зато каждая сделка
         настоящая: платформа помечает сделки от $150 000 как «МЕГА» и транслирует их в ленту событий и на график
-        (тумблер «Киты» на Рынке).
+        (тумблер «Киты» на Рынке). Движения реальных ончейн-кошельков — в блоке выше: это второй, независимый
+        источник про больших игроков, и он тоже влияет на решения ИИ.
       </p>
     </div>`;
     return { html, mount() {} };
@@ -514,7 +568,168 @@ const Views = (() => {
     return { html, mount() {} };
   }
 
-  return { desk, signals, whales, events, leaders };
+  // ================= ПРОГНОЗ ИИ: на чём основана уверенность конкретного сигнала =================
+  function fmtWait(min) {
+    if (!Number.isFinite(min) || min <= 0) return "—";
+    if (min < 90) return "≈ " + Math.max(5, Math.round(min / 5) * 5) + " мин";
+    const hh = min / 60;
+    if (hh < 48) return "≈ " + (hh < 10 ? hh.toFixed(1).replace(".", ",") : Math.round(hh)) + " ч";
+    return "≈ " + (hh / 24).toFixed(1).replace(".", ",") + " сут";
+  }
+
+  // оценка времени до уровня: средний абсолютный ход 15м-бара за последние 60 баров
+  function etaMinutes(bars, from, to) {
+    let sum = 0, n = 0;
+    for (let i = Math.max(1, bars.length - 60); i < bars.length; i++) { sum += Math.abs(bars[i].c - bars[i - 1].c); n++; }
+    const avg = n ? sum / n : 0;
+    const dist = Math.abs(to - from);
+    if (!avg || !dist) return null;
+    const barsNeed = dist / avg; // баров при средней скорости рынка
+    return { fast: barsNeed * 15 * 0.6, mid: barsNeed * 15, slow: barsNeed * 15 * 1.9 };
+  }
+
+  function signalForecast(arg) {
+    const s = S();
+    const parts = String(arg).split("|");
+    const kind = parts[0];
+    let sym, side, conf, note, entry, stop, target, ts, strat = null;
+    if (kind === "sig" && parts.length >= 3) {
+      const sig = s.signals.find((x) => x.strategy === parts[1] && x.sym === parts[2]);
+      if (!sig) return `<div class="empty" style="padding:28px">Сигнал уже устарел и удалён из ленты — свежие появляются на закрытии каждой 15-минутной свечи</div>`;
+      sym = sig.sym; side = "лонг"; conf = sig.confidence; note = sig.note;
+      entry = sig.entry; stop = sig.stop; target = sig.target; ts = sig.ts;
+      strat = Engine.STRATEGIES.find((x) => x.id === sig.strategy) || null;
+    } else {
+      const idea = (s.aiIdeas || []).find((i) => i.sym === parts[1]);
+      if (!idea) return `<div class="empty" style="padding:28px">Идея уже обновилась пересчётом — откройте её прогноз заново со вкладки «Сигналы»</div>`;
+      sym = idea.sym; side = idea.res.verdict; conf = idea.res.confidence; note = idea.res.note;
+      entry = idea.res.price; stop = idea.res.stop; target = idea.res.target; ts = idea.res.ts;
+    }
+
+    const bars = Store.getBars(sym, "15м");
+    if (!bars || bars.length < 60) {
+      Store.ensureBars(sym, "15м");
+      return `<div class="empty" style="padding:28px">Собираю свечи ${sym} для анализа… Нажмите «прогноз и логика» ещё раз через пару секунд</div>`;
+    }
+
+    const price = (s.prices[sym] && s.prices[sym].price) || entry;
+    const res = Engine.aiAnalyze(sym, bars, s.aiBrain, (s.news && s.news.items) || []);
+    const dirSign = side === "лонг" ? 1 : -1;
+
+    // ---- факторы ансамбля: что говорит за и что против ----
+    const factors = (res && res.factors ? res.factors : []).slice().sort((a, b) => Math.abs(b.dir * b.weight) - Math.abs(a.dir * a.weight));
+    const forList = factors.filter((f) => f.dir * dirSign > 0.05);
+    const againstList = factors.filter((f) => f.dir * dirSign < -0.05);
+    const maxW = Math.max(0.001, ...factors.map((f) => Math.abs(f.dir * f.weight)));
+    const factorRow = (f) => {
+      const d = f.dir * dirSign;
+      const w = Math.round(Math.abs(f.dir * f.weight) / maxW * 100);
+      return `<div class="ai-factor">
+        <span class="dir ${d > 0 ? "up" : d < 0 ? "down" : "flat"}">${d > 0 ? "▲" : d < 0 ? "▼" : "•"}</span>
+        <span class="lbl" title="${h.esc(f.label)}">${h.esc(f.label)}</span>
+        <span class="w"><i style="width:${w}%"></i></span>
+        <span class="det" title="${h.esc(f.detail)}">${h.esc(f.detail)}</span>
+      </div>`;
+    };
+
+    // ---- время до цели/стопа ----
+    const reached = dirSign * (price - target) >= 0;
+    const etaT = reached ? null : etaMinutes(bars, price, target);
+    const distT = Math.abs(target - price) / price * 100;
+    const distS = Math.abs(stop - price) / price * 100;
+
+    // ---- опыт ИИ по монете и общий ----
+    const brain = s.aiBrain || {};
+    const st = (brain.symStats && brain.symStats[sym]) || null;
+    const stWr = st && st.n ? Math.round((st.wins / st.n) * 100) : null;
+    const wr = brain.trades ? Math.round((brain.wins / brain.trades) * 100) : null;
+
+    // ---- новостной фон ----
+    const ns = (s.news && s.news.items && s.news.items.length) ? Engine.newsSentiment(s.news.items, sym) : null;
+    const newsLine = !ns
+      ? "новостная лента ещё не загружена — фактор новостей нейтрален"
+      : ns.coinItems
+        ? `по ${sym}: ${ns.coin >= 0 ? "+" : "−"}${Math.abs(ns.coin).toFixed(2)} (${ns.coinItems} свеж. новост${ns.coinItems % 10 === 1 && ns.coinItems % 100 !== 11 ? "я" : "й"}) · рынок в целом ${ns.bull}↑/${ns.bear}↓`
+        : `свежих новостей по ${sym} нет · рынок в целом ${ns.bull}↑/${ns.bear}↓`;
+
+    // ---- краткий разбор логики своими словами ----
+    const short = (l) => String(l).split("·")[0].trim().toLowerCase();
+    const forTop = forList.slice(0, 3).map((f) => short(f.label));
+    const againstTop = againstList.slice(0, 2).map((f) => short(f.label));
+    const scoreTxt = res ? `${res.score >= 0 ? "+" : "−"}${Math.abs(Math.round(res.score * 100))}` : null;
+    let summary = "";
+    if (strat) {
+      summary += `Вход найден стратегией «${strat.name}»: ${h.esc(note)}. ${h.esc(strat.desc)}. `;
+    } else {
+      summary += `Идея ИИ: ансамбль 12 факторов голосует за ${side} с оценкой ${scoreTxt} — ${h.esc(note)}. `;
+    }
+    if (!res) {
+      summary += `Свежий пересчёт пока не удался — смотрите триггер стратегии. `;
+    } else if (res.verdict === side) {
+      summary += `Свежий пересчёт подтверждает направление: ансамбль на стороне ${side} (оценка ${scoreTxt}, вердикт ${res.confidence}%). `;
+    } else if (res.verdict === "wait") {
+      summary += `Внимание: свежий пересчёт ансамбля даёт «ожидание» — импульс с момента сигнала ослаб, входите меньшей суммой. `;
+    } else {
+      summary += `Внимание: свежий пересчёт даёт «${res.verdict}» — картина после сигнала изменилась, аккуратнее. `;
+    }
+    if (forTop.length) summary += `Главные аргументы за: ${forTop.join(", ")}. `;
+    if (againstTop.length) summary += `Что против: ${againstTop.join(", ")} — поэтому позиция закрывается по стопу без уговоров. `;
+    summary += `Математика: риск ${distS.toFixed(1)}% (это 1R), цель ${side === "лонг" ? "+" : "−"}${distT.toFixed(1)}% (2R) — один плюс перекрывает два минуса${wr != null ? `; по опыту платформы ИИ закрывает в плюс ${wr}% сделок` : ""}. `;
+    if (st && st.n >= 3) summary += `По ${sym} у ИИ уже ${st.n} сделок (винрейт ${stWr}%), текущая серия ${st.streak > 0 ? st.streak + " плюс подряд" : st.streak < 0 ? Math.abs(st.streak) + " минуса подряд" : "нейтральная"} — это учтено в уверенности. `;
+    summary += reached
+      ? `Цель по цене уже достигнута — сигнал отработал.`
+      : `Ориентир по времени до цели: ${fmtWait(etaT ? etaT.mid : NaN)} на средней скорости рынка, ${fmtWait(etaT ? etaT.fast : NaN)} на быстром, до ${fmtWait(etaT ? etaT.slow : NaN)} на вялом. Если цена первой дойдёт до стопа — сделка закроется с минусом 1R: это цена за шанс получить 2R.`;
+
+    return `
+    <div>
+      <div class="cab-head">
+        <span class="cab-icon" style="background:rgba(255,45,120,0.13)">${h.coin(sym, 30)}</span>
+        <div>
+          <h2 class="cab-title">Прогноз ИИ: ${sym} · ${side}</h2>
+          <p class="cab-sub">${strat ? h.esc(strat.name) : "ИИ-сканер · ансамбль 12 факторов"} · сигнал ${ago(ts)} назад · цель 2R · спот</p>
+        </div>
+      </div>
+      <div class="cab-body">
+        <div class="ai-verdict ${side === "лонг" ? "long" : "short"}">
+          <div class="ai-v-head"><span class="ai-v-side">${side}</span><span class="ai-v-sym">уверенность ${conf}%${res && res.verdict === side ? ` · ансамбль сейчас ${res.confidence}%` : ""}</span><span class="ai-conf-num num">${conf}%</span></div>
+          <div class="ai-conf"><i style="width:${conf}%"></i></div>
+        </div>
+
+        <div class="notify-sec">Логика входа</div>
+        <div class="fc-box">${h.esc(strat ? `${strat.name} — ${strat.desc}` : "ансамбль 12 факторов (тренд, RSI, MACD, Боллинджер, Ишимоку, объём, импульс, новости, ADX, стохастик, старший ТФ, киты)")}<br><span style="color:#d4cbd9">${h.esc(note)}</span></div>
+
+        <div class="notify-sec">Почему ИИ ждёт профита — факторы за (${forList.length})</div>
+        ${forList.length ? `<div class="ai-factors">${forList.map(factorRow).join("")}</div>` : `<div class="ai-limit-note">Сильных факторов в пользу сделки нет — триггер сработал на слабом большинстве. Такую сделку лучше пропустить.</div>`}
+
+        <div class="notify-sec">Что против — факторы риска (${againstList.length})</div>
+        ${againstList.length ? `<div class="ai-factors">${againstList.map(factorRow).join("")}</div>` : `<div class="ai-limit-note">Открыто противостоящих факторов нет — картина односторонняя.</div>`}
+
+        <div class="notify-sec">Сколько ждать до цели</div>
+        <div class="fc-eta num">
+          <div><div class="k">быстрый рынок</div><div class="v text-green">${fmtWait(etaT ? etaT.fast : NaN)}</div></div>
+          <div><div class="k">средняя скорость</div><div class="v">${fmtWait(etaT ? etaT.mid : NaN)}</div></div>
+          <div><div class="k">вялый рынок</div><div class="v">${fmtWait(etaT ? etaT.slow : NaN)}</div></div>
+          <div><div class="k">до стопа</div><div class="v text-red">−${distS.toFixed(1)}%</div></div>
+        </div>
+        <div class="ai-limit-note">Оценка — по среднему ходу цены за 15-минутный бар за последние 60 баров. Рынок не идёт по прямой: сначала цель может «покачать» против входа. Уровни: вход ${Fmt.fmtPrice(entry)} · текущая ${Fmt.fmtPrice(price)} · стоп ${Fmt.fmtPrice(stop)} · цель ${Fmt.fmtPrice(target)}.</div>
+
+        <div class="notify-sec">Опыт ИИ и новостной фон</div>
+        <div class="fc-box num">${st ? `по ${sym}: ${st.n} сделок · винрейт ${stWr}% · серия ${st.streak > 0 ? "+" + st.streak : st.streak}` : `по ${sym} сделок пока не было — опыт нулевой`}${wr != null ? ` · общий опыт: ${brain.trades} сделок, винрейт ${wr}% · порог входа ${brain.confThreshold || 76}%` : ""}<br><span style="color:#a99bb5">новости: ${h.esc(newsLine)}</span></div>
+
+        <div class="notify-sec">Краткий разбор логики</div>
+        <div class="fc-summary">${summary}</div>
+
+        <div class="notify-actions">
+          ${kind === "sig"
+            ? `<button class="ai-open" data-action="sig:take" data-arg="${sym}">Взять в демо · ${h.hruAmount(500)}</button>`
+            : `<button class="ai-open" data-action="ai:open-idea" data-arg="${sym}">Открыть в демо по этой идее</button>`}
+          <button class="btn-ghost" data-action="modal:close">Закрыть</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  return { desk, signals, whales, events, leaders, signalForecast };
 })();
 
 window.Views = Views;
