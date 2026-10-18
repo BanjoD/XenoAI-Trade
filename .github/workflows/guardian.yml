@@ -1,0 +1,56 @@
+# XenoAI Guardian — автономная торговля ИИ без открытого браузера.
+# Каждые 15 минут страж подтягивает аккаунт(ы) из облака, догоняет рынок реальными
+# 15-минутными свечами и сохраняет результат обратно в облако.
+#
+# НАСТРОЙКА (один раз):
+#   Settings → Secrets and variables → Actions → New repository secret:
+#     XENOAI_LOGIN      — логин(ы): один аккаунт = одна строка (David / Yura)
+#     XENOAI_SYNC_CODE  — код(ы) построчно в том же порядке (строка 1 ↔ строка 1)
+# Ручной запуск: вкладка Actions → XenoAI Guardian → Run workflow.
+#
+# Бесплатно: public-репозиторий — безлимит; private — ~1440 мин/мес из 2000 бесплатных.
+
+name: XenoAI Guardian
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Прогон ИИ-стража (догон рынка + сохранение в облако)
+        env:
+          XENOAI_LOGIN: ${{ secrets.XENOAI_LOGIN }}
+          XENOAI_SYNC_CODE: ${{ secrets.XENOAI_SYNC_CODE }}
+        run: |
+          # Поддержка одного ИЛИ нескольких аккаунтов: строка N логина ↔ строка N кода
+          mapfile -t LOGINS < <(printf '%s\n' "$XENOAI_LOGIN" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d')
+          mapfile -t CODES  < <(printf '%s\n' "$XENOAI_SYNC_CODE" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d')
+          if [ "${#LOGINS[@]}" -eq 0 ]; then
+            echo "::error::Секрет XENOAI_LOGIN пуст — впишите логин аккаунта (одна строка = один аккаунт)"
+            exit 1
+          fi
+          if [ "${#LOGINS[@]}" -ne "${#CODES[@]}" ]; then
+            echo "::error::Число строк не совпадает: XENOAI_LOGIN — ${#LOGINS[@]}, XENOAI_SYNC_CODE — ${#CODES[@]}. Строка 1 логина ↔ строка 1 кода, строка 2 ↔ строка 2."
+            exit 1
+          fi
+          fail=0
+          for i in "${!LOGINS[@]}"; do
+            echo ""
+            echo "=== XenoAI Guardian · аккаунт «${LOGINS[$i]}» ($((i+1)) из ${#LOGINS[@]}) ==="
+            if ! node tools/guardian.js "${LOGINS[$i]}" "${CODES[$i]}"; then
+              echo "::warning::Аккаунт «${LOGINS[$i]}»: прогон завершился с ошибкой (подробности выше)"
+              fail=1
+            fi
+          done
+          exit $fail
