@@ -27,6 +27,8 @@ const UI = (() => {
     eyeOff: `<path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><path d="m2 2 20 20"/>`,
     lock: `<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>`,
     shield: `<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>`,
+    sparkles: `<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/><path d="M5 16l.7 1.6L7.3 18.3"/>`,
+    cpu: `<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/>`,
     arrowRight: `<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>`,
   };
   function icon(name, size) { return svgWrap(ICON_PATHS[name] || "", size || 17); }
@@ -51,15 +53,15 @@ const UI = (() => {
     size = size || 36;
     return `<svg width="${size}" height="${size}" viewBox="0 0 100 100" aria-label="XenoAI Trade">
       <defs>
-        <linearGradient id="xenoGold${size}" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#f5c542"/><stop offset="55%" stop-color="#d9e021"/><stop offset="100%" stop-color="#a3e635"/></linearGradient>
-        <linearGradient id="xenoX${size}" x1="0" y1="1" x2="1" y2="0"><stop offset="0%" stop-color="#a3e635"/><stop offset="100%" stop-color="#f5c542"/></linearGradient>
-        <radialGradient id="xenoBg${size}" cx="50%" cy="38%" r="70%"><stop offset="0%" stop-color="#1e1e24"/><stop offset="100%" stop-color="#0d0d10"/></radialGradient>
+        <linearGradient id="xenoGold${size}" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#ff2d78"/><stop offset="55%" stop-color="#c74fd8"/><stop offset="100%" stop-color="#8b5cf6"/></linearGradient>
+        <linearGradient id="xenoX${size}" x1="0" y1="1" x2="1" y2="0"><stop offset="0%" stop-color="#8b5cf6"/><stop offset="100%" stop-color="#ff2d78"/></linearGradient>
+        <radialGradient id="xenoBg${size}" cx="50%" cy="38%" r="70%"><stop offset="0%" stop-color="#241426"/><stop offset="100%" stop-color="#0d0a10"/></radialGradient>
       </defs>
       <rect width="100" height="100" rx="24" fill="url(#xenoBg${size})"/>
       <rect x="1" y="1" width="98" height="98" rx="23" fill="none" stroke="rgba(255,255,255,0.08)"/>
       <circle cx="50" cy="50" r="39" fill="none" stroke="url(#xenoGold${size})" stroke-width="3.5" opacity="0.9"/>
       <circle cx="50" cy="50" r="33" fill="none" stroke="url(#xenoGold${size})" stroke-width="1.4" opacity="0.5"/>
-      <g stroke="#d9e021" stroke-width="1.6" opacity="0.55">
+      <g stroke="#ff8ad2" stroke-width="1.6" opacity="0.5">
         <line x1="50" y1="17" x2="50" y2="20.5"/><line x1="62" y1="19.9" x2="60.7" y2="23.1"/>
         <line x1="72.8" y1="27.2" x2="70.4" y2="29.6"/><line x1="80.1" y1="38" x2="76.9" y2="39.3"/>
         <line x1="83" y1="50" x2="79.5" y2="50"/><line x1="80.1" y1="62" x2="76.9" y2="60.7"/>
@@ -72,9 +74,9 @@ const UI = (() => {
       <path d="M27 25 L45 43 M73 75 L55 57" stroke="url(#xenoX${size})" stroke-width="9" stroke-linecap="round" fill="none"/>
       <path d="M73 25 L55 43 M27 75 L45 57" stroke="url(#xenoX${size})" stroke-width="9" stroke-linecap="round" fill="none" opacity="0.92"/>
       <circle cx="50" cy="50" r="5.5" fill="#0d0d10" stroke="url(#xenoX${size})" stroke-width="3"/>
-      <circle cx="27" cy="25" r="3" fill="#a3e635"/><circle cx="73" cy="25" r="3" fill="#f5c542"/>
-      <circle cx="27" cy="75" r="3" fill="#f5c542"/><circle cx="73" cy="75" r="3" fill="#a3e635"/>
-      <path d="M27 25 L14 20 M73 25 L86 20 M27 75 L14 80 M73 75 L86 80" stroke="#a3e635" stroke-width="1.4" opacity="0.6"/>
+      <circle cx="27" cy="25" r="3" fill="#ff8ad2"/><circle cx="73" cy="25" r="3" fill="#c74fd8"/>
+      <circle cx="27" cy="75" r="3" fill="#c74fd8"/><circle cx="73" cy="75" r="3" fill="#ff8ad2"/>
+      <path d="M27 25 L14 20 M73 25 L86 20 M27 75 L14 80 M73 75 L86 80" stroke="#ff5fa8" stroke-width="1.4" opacity="0.6"/>
     </svg>`;
   }
 
@@ -82,7 +84,7 @@ const UI = (() => {
     return `<span style="display:inline-flex;align-items:center;gap:10px">
       ${xenoMark(34)}
       ${compact ? "" : `<span style="line-height:1">
-        <span style="font-size:16.5px;font-weight:600;letter-spacing:-0.02em">Xeno<em style="font-style:normal;color:var(--lime)">AI</em></span>
+        <span style="font-size:16.5px;font-weight:600;letter-spacing:-0.02em">Xeno<em style="font-style:normal;color:var(--accent-2);text-shadow:0 0 12px rgba(255,45,120,.55)">AI</em></span>
         <span style="margin-left:6px;font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.18em;color:#71717a">Trade</span>
       </span>`}
     </span>`;

@@ -50,7 +50,7 @@ const Views = (() => {
             <div style="display:flex;align-items:center;gap:10px;min-width:0">
               ${h.coin(p.sym, 28)}
               <div style="min-width:0">
-                <div class="row-title">${p.sym} <span style="font-size:11px;color:#71717a">${p.owner === "lab" ? "· лаборатория" : "· демо"} · ${p.side} ×${p.lev}</span></div>
+                <div class="row-title">${p.sym} <span style="font-size:11px;color:#71717a">${p.owner === "lab" ? "· лаборатория" : "· демо"} · ${p.side}</span></div>
                 <div class="row-sub num">вход ${fmtPrice(p.entry)} → ${fmtPrice(price)}</div>
               </div>
             </div>
@@ -79,20 +79,20 @@ const Views = (() => {
       <div class="page-head">
         <div>
           <h1 class="page-title">Деск</h1>
-          <p class="page-sub">Лаборатория стратегий на реальных ценах Binance · ${s.degraded ? "симуляция (API недоступен)" : "данные live"}</p>
+          <p class="page-sub">Лаборатория стратегий на реальных ценах · ${s.degraded ? "симуляция (источники недоступны)" : "данные live · источник: " + (s.source || "подключение…")}</p>
         </div>
-        <div class="live-pill hidden-sm">${h.onlineDot()} ${s.degraded ? "демо-симуляция" : "binance · spot"}</div>
+        <div class="live-pill hidden-sm">${h.onlineDot()} ${s.degraded ? "демо-симуляция" : (s.source || "live") + " · спот"}</div>
       </div>
 
       <div class="stat-grid cols4">
+        ${h.statCard("ИИ-автопилот", s.aiAuto ? "вкл" : "выкл", s.aiAuto ? "text-green" : "text-dim",
+          `${s.userPositions.filter((p) => p.strategy === "ai").length} ИИ-позиций · ${s.aiIdeas.length} идей в сканере · спот`)}
         ${h.statCard("Лучший счёт", `${bestPct >= 0 ? "+" : "−"}${Math.abs(bestPct).toFixed(2)}%`, bestPct >= 0 ? "text-green" : "text-red",
           best ? `${h.esc(best.name)} · баланс ${Fmt.fmtNum(Math.round(best.balance))} ХРЮ` : "—")}
         ${h.statCard("Вся лаборатория", h.hruAmount(labTotal - labStart, true, "text-gold"), "",
           `<span class="stat-sub-row">${Charts.progressDots(5, profitable)}<span>${profitable} из ${labAccounts.length} счетов в плюсе</span></span>`)}
         ${h.statCard("Эталон: держать BTC", `${btcChg >= 0 ? "+" : "−"}${Math.abs(btcChg).toFixed(2)}%`, btcChg >= 0 ? "text-green" : "text-red",
-          `24ч Binance · лаборатория ${labPct >= 0 ? "+" : "−"}${Math.abs(labPct).toFixed(2)}%`)}
-        ${h.statCard("Сейчас в рынке", labPositions.length + userPositions.length, "text-green",
-          `позиций · нереализовано ${h.hruAmount(unrealLab, true)}`)}
+          `24ч · лаборатория ${labPct >= 0 ? "+" : "−"}${Math.abs(labPct).toFixed(2)}%`)}
       </div>
 
       <div class="stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr))">
@@ -128,9 +128,36 @@ const Views = (() => {
   // ================= СИГНАЛЫ =================
   function signals() {
     const s = S();
+
+    // ИИ-сканер: лучшие идеи по всем монетам (автопилот пересчитывает на каждом обновлении свечей)
+    const ideas = s.aiIdeas || [];
+    const scanner = ideas.length === 0
+      ? `<div class="empty">ИИ сканирует 24 монеты — первые идеи появятся в течение минуты</div>`
+      : `<div class="rows row-divide">` + ideas.slice(0, 6).map((i) => {
+          const price = (s.prices[i.sym] && s.prices[i.sym].price) || i.res.price;
+          const moved = ((price / i.res.price - 1) * 100) || 0;
+          return `<div class="sig-row">
+            ${h.coin(i.sym, 34)}
+            <div style="min-width:0;flex:1">
+              <div class="sig-head">
+                <span class="sig-sym">${i.sym}</span>
+                ${h.tag(i.res.verdict === "лонг" ? "green" : "red", i.res.verdict)}
+                ${h.tag("blue", `уверенность ${i.res.confidence}%`)}
+                ${!i.guard.ok ? h.tag("orange", "защита: " + i.guard.why) : ""}
+              </div>
+              <div class="sig-note num">стоп ${fmtPrice(i.res.stop)} · цель ${fmtPrice(i.res.target)} · ${h.esc(i.res.note)}</div>
+            </div>
+            <div class="row-right">
+              <div class="num" style="font-size:13.5px;font-weight:500">${fmtPrice(price)}</div>
+              <div class="num ${moved >= 0 ? "text-green" : "text-red"}" style="font-size:11.5px">${moved >= 0 ? "+" : "−"}${Math.abs(moved).toFixed(2)}% к идее</div>
+            </div>
+            <button class="btn-take" data-action="ai:open-idea" data-arg="${i.sym}">Открыть в демо</button>
+          </div>`;
+        }).join("") + `</div>`;
+
     const rows = s.signals.length === 0
       ? `<section class="card card-pad" style="text-align:center;padding:40px">
-          <div style="font-size:14px;color:#a1a1aa">Сигналы формируются на закрытиях 15-минутных свечей</div>
+          <div style="font-size:14px;color:#a1a1aa">Сигналы стратегий формируются на закрытиях 15-минутных свечей</div>
           <div style="margin-top:4px;font-size:12.5px;color:#52525b">Как только стратегия увидит пробой — сигнал появится здесь автоматически</div>
         </section>`
       : `<section class="card"><div class="rows row-divide">` + s.signals.slice(0, 14).map((sig) => {
@@ -164,18 +191,38 @@ const Views = (() => {
 
     const html = `
     <div class="stack">
-      <div>
-        <h1 class="page-title">Сигналы</h1>
-        <p class="page-sub">Движок считает Боллинджера, Ишимоку, MACD/RSI и объёмные пробои на 15м свечах Binance</p>
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">Сигналы</h1>
+          <p class="page-sub">ИИ-сканер по всем монетам + 5 стратегий движка · реальные свечи · спот</p>
+        </div>
+        <div class="live-pill hidden-sm">${h.onlineDot()} ${s.aiAuto ? "автопилот вкл" : "автопилот выкл"}</div>
       </div>
+
+      <section class="card card-pad" style="border-color:rgba(255,45,120,.22)">
+        ${h.sectionTitle("ИИ-сканер · лучшие идеи по рынку", `<span style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:12px;color:#71717a">ML-ансамбль · скам-защита</span>
+          <button class="ai-auto-pill ${s.aiAuto ? "on" : ""}" data-action="ai:auto"><span class="d"></span>автопилот</button></span>`)}
+        ${scanner}
+        <p style="margin-top:10px;font-size:12px;line-height:1.6;color:#71717a">
+          ИИ прогоняет через ML-ансамбль все ${DataLib.WATCHLIST.length} монет на каждой свежей свече 15м: тренд к EMA50, MACD, RSI,
+          Боллинджер, Ишимоку, объёмные аномалии и импульс. Заходит только туда, где видит потенциал роста и несколько
+          подтверждающих факторов. Склам-защита отсекает низколиквидные и аномальные монеты. Когда факторы разворачиваются —
+          ИИ флипает позицию сам, ультра-быстрые выходы отрабатывают на каждом тике цены.
+          ${s.aiAuto ? "Автопилот вкл: ИИ входит и флипает на вашем демо-счёте сам." : "Автопилот выкл: входите вручную кнопкой на идее."}
+        </p>
+      </section>
+
       ${rows}
+
       <section class="card card-pad">
         <div style="margin-bottom:8px;font-size:13.5px;font-weight:600">Как это работает</div>
         <p style="font-size:12.5px;line-height:1.7;color:#71717a">
-          Каждые ~2 секунды платформа подтягивает свежие 15-минутные свечи Binance по 24 инструментам и пересчитывает
-          индикаторы: BB(20,2), облако Ишимоку, MACD(12,26,9), RSI(14), ATR(14) и объёмные аномалии. Стоп и цель
-          рассчитываются от ATR: риск 1.2×ATR, цель — 2R. Сигнал можно взять в демо — сделка исполнится по реальной
-          рыночной цене, а результат придёт в хрювнах.
+          Все данные — спотовый рынок: платформа каждые ~2 секунды подтягивает свежие 15-минутные свечи по 24 инструментам
+          и пересчитывает индикаторы: BB(20,2), облако Ишимоку, MACD(12,26,9), RSI(14), ATR(14) и объёмные аномалии.
+          Никаких фьючерсов и плеча: «лонг» означает тренд вверх (монета в портфеле), «шорт» — тренд вниз (выход в кэш).
+          Стоп и цель считаются от ATR: риск 1.2×ATR, цель — 2R. Сигнал можно взять в демо — сделка исполнится по
+          реальной рыночной цене, а результат придёт в хрювнах.
         </p>
       </section>
     </div>`;
@@ -259,10 +306,10 @@ const Views = (() => {
       ? `<div class="empty">Движок только просыпается — события появятся в течение минуты</div>`
       : s.events.map((e) => `
         <article class="ev-row">
-          ${e.sym ? h.coin(e.sym, 34) : `<span class="ev-icon" style="background:${e.tone === "bull" ? "rgba(34,197,94,.15)" : e.tone === "bear" ? "rgba(239,68,68,.15)" : "rgba(255,255,255,.06)"}">${e.tone === "bull" ? "▲" : e.tone === "bear" ? "▼" : "•"}</span>`}
+          ${e.sym ? h.coin(e.sym, 34) : `<span class="ev-icon" style="background:${e.tone === "bull" ? "rgba(255,45,120,.15)" : e.tone === "bear" ? "rgba(239,68,68,.15)" : "rgba(255,255,255,.06)"}">${e.tone === "bull" ? "▲" : e.tone === "bear" ? "▼" : "•"}</span>`}
           <div style="min-width:0;flex:1">
             <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px">
-              <span class="ev-tag" style="background:${e.tone === "bull" ? "rgba(34,197,94,.13)" : e.tone === "bear" ? "rgba(239,68,68,.13)" : "rgba(255,255,255,.07)"};color:${e.tone === "bull" ? "#4ade80" : e.tone === "bear" ? "#f87171" : "#d4d4d8"}">${e.tone === "bull" ? "бычье" : e.tone === "bear" ? "медвежье" : "нейтрально"}</span>
+              <span class="ev-tag" style="background:${e.tone === "bull" ? "rgba(255,45,120,.13)" : e.tone === "bear" ? "rgba(239,68,68,.13)" : "rgba(255,255,255,.07)"};color:${e.tone === "bull" ? "#ff5fa8" : e.tone === "bear" ? "#f87171" : "#d4d4d8"}">${e.tone === "bull" ? "бычье" : e.tone === "bear" ? "медвежье" : "нейтрально"}</span>
               <span class="ev-time num">${ago(e.ts)}</span>
             </div>
             <h3 class="ev-title">${h.esc(e.title)}</h3>

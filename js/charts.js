@@ -5,12 +5,13 @@ const Charts = (() => {
   const fmtPrice = (v) => Fmt.fmtPrice(v);
 
   const LEVEL_STYLES = {
-    green: { line: "#4ade80", text: "#bbf7d0", bg: "rgba(34,197,94,0.18)" },
-    greenfill: { line: "#4ade80", text: "#052e16", bg: "#4ade80" },
-    red: { line: "#f87171", text: "#fecaca", bg: "rgba(239,68,68,0.2)" },
+    green: { line: "#ff4fa3", text: "#ffd3e8", bg: "rgba(255, 45, 120, 0.18)" },
+    greenfill: { line: "#ff4fa3", text: "#3d0620", bg: "#ff4fa3" },
+    red: { line: "#f87171", text: "#fecaca", bg: "rgba(239, 68, 68, 0.2)" },
     redfill: { line: "#f87171", text: "#450a0a", bg: "#f87171" },
-    orange: { line: "#fb923c", text: "#fed7aa", bg: "rgba(251,146,60,0.22)" },
+    orange: { line: "#fb923c", text: "#fed7aa", bg: "rgba(251, 146, 60, 0.22)" },
     orangefill: { line: "#fb923c", text: "#431407", bg: "#fb923c" },
+    violet: { line: "#a78bfa", text: "#ede9fe", bg: "rgba(167, 139, 250, 0.2)" },
     white: { line: "rgba(255,255,255,0.85)", text: "#18181b", bg: "#ffffff" },
     gray: { line: "rgba(255,255,255,0.4)", text: "#d4d4d8", bg: "rgba(255,255,255,0.1)" },
   };
@@ -83,10 +84,11 @@ const Charts = (() => {
     if (volume) {
       candles.forEach((c, i) => {
         const bh = (c.v / maxV) * (volH - 6);
-        s.push(`<rect x="${(px(i) - cw / 2).toFixed(1)}" y="${(priceH + (volH - bh)).toFixed(1)}" width="${cw.toFixed(1)}" height="${Math.max(1, bh).toFixed(1)}" fill="${c.c >= c.o ? "#52525b" : "#3f3f46"}" opacity="0.55"/>`);
+        s.push(`<rect x="${(px(i) - cw / 2).toFixed(1)}" y="${(priceH + (volH - bh)).toFixed(1)}" width="${cw.toFixed(1)}" height="${Math.max(1, bh).toFixed(1)}" fill="${c.c >= c.o ? "rgba(255,79,163,0.32)" : "rgba(167,139,250,0.16)"}" opacity="0.85"/>`);
       });
     }
-    // EMA
+    // EMA (неон-розовая + фиолетовая)
+    const EMA_COLORS = ["#ff2d78", "#a78bfa"];
     for (let si = 0; si < emaSvgs.length; si++) {
       const vals = emaSvgs[si].vals;
       let d = "", started = false;
@@ -95,7 +97,7 @@ const Charts = (() => {
         d += `${started ? "L" : "M"}${px(i).toFixed(1)},${py(vals[i]).toFixed(1)} `;
         started = true;
       }
-      if (d) s.push(`<path d="${d}" fill="none" stroke="#9ca3af" stroke-opacity="${(0.55 - si * 0.12).toFixed(2)}" stroke-width="1.1"/>`);
+      if (d) s.push(`<path d="${d}" fill="none" stroke="${EMA_COLORS[si % EMA_COLORS.length]}" stroke-opacity="${(0.62 - si * 0.14).toFixed(2)}" stroke-width="1.15"/>`);
     }
     // свечи
     candles.forEach((c, i) => {
@@ -103,8 +105,8 @@ const Charts = (() => {
       const yO = py(c.o), yC = py(c.c);
       const top = Math.min(yO, yC);
       const bh = Math.max(1, Math.abs(yC - yO));
-      s.push(`<g><line x1="${px(i).toFixed(1)}" x2="${px(i).toFixed(1)}" y1="${py(c.h).toFixed(1)}" y2="${py(c.l).toFixed(1)}" stroke="${up ? "#d4d4d8" : "#71717a"}" stroke-width="1"/>`
-        + `<rect x="${(px(i) - cw / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${cw.toFixed(1)}" height="${bh.toFixed(1)}" fill="${up ? "#e4e4e7" : "#3a3a40"}" ${up ? "" : `stroke="#8e8e96" stroke-width="0.7"`} ${cw > 3 ? 'rx="1"' : ""}/></g>`);
+      s.push(`<g><line x1="${px(i).toFixed(1)}" x2="${px(i).toFixed(1)}" y1="${py(c.h).toFixed(1)}" y2="${py(c.l).toFixed(1)}" stroke="${up ? "#ff8ac6" : "#8a5560"}" stroke-width="1"/>`
+        + `<rect x="${(px(i) - cw / 2).toFixed(1)}" y="${top.toFixed(1)}" width="${cw.toFixed(1)}" height="${bh.toFixed(1)}" fill="${up ? "#ff4fa3" : "#332028"}" ${up ? "" : `stroke="#c25b6e" stroke-width="0.7"`} ${cw > 3 ? 'rx="1"' : ""}/></g>`);
     });
     // уровни
     levels.forEach((lv, i) => {
@@ -129,9 +131,9 @@ const Charts = (() => {
     });
     // текущая цена
     if (currentPrice != null) {
-      s.push(`<line x1="0" x2="${plotW}" y1="${py(currentPrice).toFixed(1)}" y2="${py(currentPrice).toFixed(1)}" stroke="rgba(255,255,255,0.65)" stroke-width="1" stroke-dasharray="5 5"/>`);
-      s.push(`<rect x="${plotW + 2}" y="${(py(currentPrice) - 10).toFixed(1)}" width="${rightPad - 6}" height="20" rx="4" fill="#ffffff"/>`);
-      s.push(`<text x="${plotW + 8}" y="${(py(currentPrice) + 3.5).toFixed(1)}" font-size="10.5" font-weight="600" fill="#131316" class="num">${fmtPrice(currentPrice)}</text>`);
+      s.push(`<line x1="0" x2="${plotW}" y1="${py(currentPrice).toFixed(1)}" y2="${py(currentPrice).toFixed(1)}" stroke="rgba(255,138,210,0.6)" stroke-width="1" stroke-dasharray="5 5"/>`);
+      s.push(`<rect x="${plotW + 2}" y="${(py(currentPrice) - 10).toFixed(1)}" width="${rightPad - 6}" height="20" rx="4" fill="#ff2d78"/>`);
+      s.push(`<text x="${plotW + 8}" y="${(py(currentPrice) + 3.5).toFixed(1)}" font-size="10.5" font-weight="600" fill="#ffffff" class="num">${fmtPrice(currentPrice)}</text>`);
     }
     // маркеры китов
     markers.forEach((m) => {
@@ -139,7 +141,7 @@ const Charts = (() => {
       const y = py(m.price);
       const buy = m.kind.indexOf("buy") === 0;
       const strong = m.kind.endsWith("plus");
-      const col = buy ? "#4ade80" : "#f87171";
+      const col = buy ? "#ff4fa3" : "#f87171";
       const dy = buy ? 14 : -14;
       const arrow = buy
         ? `<path d="M0,6 L-4.5,-1 L-1.6,-1 L-1.6,-6 L1.6,-6 L1.6,-1 L4.5,-1 Z" fill="${col}" transform="scale(0.9)"/>`
@@ -157,8 +159,8 @@ const Charts = (() => {
   function lineVolume(el, data, opts) {
     opts = opts || {};
     const volumes = opts.volumes;
-    const lineColor = opts.lineColor || "#f87171";
-    const volColor = opts.volColor || "#3b82f6";
+    const lineColor = opts.lineColor || "#ff4fa3";
+    const volColor = opts.volColor || "#a78bfa";
     const timeLabels = opts.timeLabels;
 
     const w = el.clientWidth, h = el.clientHeight;
@@ -245,15 +247,15 @@ const Charts = (() => {
     for (let i = 1; i < data.length; i++) d += ` L${px(i).toFixed(1)},${py(data[i - 1]).toFixed(1)} L${px(i).toFixed(1)},${py(data[i]).toFixed(1)}`;
     const baseY = py(min) + 6;
     el.innerHTML = `<svg width="${w}" height="${h}" style="width:100%" class="block">
-      <line x1="0" x2="${w}" y1="${baseY.toFixed(1)}" y2="${baseY.toFixed(1)}" stroke="rgba(255,255,255,0.14)" stroke-dasharray="3 4"/>
-      <path d="${d}" fill="none" stroke="#d4d4d8" stroke-width="1.6" stroke-linejoin="round"/>
-      <circle cx="${px(data.length - 1).toFixed(1)}" cy="${py(data[data.length - 1]).toFixed(1)}" r="3" fill="#fff"/>
+      <line x1="0" x2="${w}" y1="${baseY.toFixed(1)}" y2="${baseY.toFixed(1)}" stroke="rgba(255,138,210,0.2)" stroke-dasharray="3 4"/>
+      <path d="${d}" fill="none" stroke="#ff8ad2" stroke-width="1.6" stroke-linejoin="round" style="filter:drop-shadow(0 0 4px rgba(255,45,120,.45))"/>
+      <circle cx="${px(data.length - 1).toFixed(1)}" cy="${py(data[data.length - 1]).toFixed(1)}" r="3" fill="#ff8ad2"/>
     </svg>`;
   }
 
   // ------- точки прогресса -------
   function progressDots(total, filled, color) {
-    color = color || "#4ade80";
+    color = color || "#ff4fa3";
     let out = `<span class="pdots">`;
     for (let i = 0; i < total; i++) out += `<i class="${i < filled ? "f" : ""}" ${i < filled ? `style="background:${color}"` : ""}></i>`;
     return out + `</span>`;

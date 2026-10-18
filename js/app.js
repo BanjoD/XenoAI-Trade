@@ -43,11 +43,29 @@ const App = (() => {
     const s = Store.state;
     const user = Auth.readSession();
     const btc = s.prices.BTC ? s.prices.BTC.price : 0;
+    const live = s.mode === "live";
+    const conn = window.Live ? Live.state.conn : null;
+    const liveBal = window.Live ? Live.balanceUSDT() : null;
+    const sourceLabel = s.degraded ? "симуляция" : (s.source || "подключение…");
 
-    const sidebar = `
-    <aside class="sidebar">
-      <button class="sb-logo" data-action="nav" data-arg="desk">${h.xenoLogo()}</button>
-
+    const balanceCard = live
+      ? `
+      <div class="balance-card">
+        <div class="balance-row">
+          <span class="balance-label">Баланс биржи</span>
+          <span class="balance-value num">${liveBal != null ? Fmt.fmtNum(liveBal, 2) + " USDT" : "—"}</span>
+        </div>
+        <div class="balance-sub">
+          <span>${conn ? h.esc(conn.label) : "нет подключения"}</span>
+          <span class="${s.degraded ? "live-deg" : "live-ok"}">${sourceLabel}</span>
+        </div>
+        <div class="mode-seg" style="margin-top:8px">
+          <button class="mode-btn" data-action="mode:demo">Демо</button>
+          <button class="mode-btn active" data-action="live:open">Реальный</button>
+        </div>
+        <button class="btn-ghost" style="width:100%;margin-top:6px;padding:7px 0;font-size:12px" data-action="live:open">${h.icon("wallet", 13)} Управление подключением</button>
+      </div>`
+      : `
       <div class="balance-card">
         <div class="balance-row">
           <span class="balance-label">Демо-баланс</span>
@@ -55,10 +73,20 @@ const App = (() => {
         </div>
         <div class="balance-sub num">
           <span id="sb-btc">BTC $${Fmt.fmtPrice(btc)}</span>
-          <span id="sb-live" class="${s.degraded ? "live-deg" : "live-ok"}">${s.degraded ? "симуляция" : "binance live"}</span>
+          <span id="sb-live" class="${s.degraded ? "live-deg" : "live-ok"}">${sourceLabel}</span>
+        </div>
+        <div class="mode-seg" style="margin-top:8px">
+          <button class="mode-btn active">Демо</button>
+          <button class="mode-btn" data-action="mode:live">Реальный</button>
         </div>
         <button class="btn-lime" data-action="cabinet:open">Кабинет · пополнить</button>
-      </div>
+      </div>`;
+
+    const sidebar = `
+    <aside class="sidebar">
+      <button class="sb-logo" data-action="nav" data-arg="desk">${h.xenoLogo()}</button>
+
+      ${balanceCard}
 
       <nav class="sb-nav scroll">
         ${NAV.map((n) => navItem(n, view === n.id, badgeFor(n.id))).join("")}
@@ -96,7 +124,7 @@ const App = (() => {
         </div>
       </div>
       <div class="desk-topline">
-        <span class="t" id="dt-status">${s.degraded ? "Binance недоступен — работает симуляция" : "Данные в реальном времени · Binance spot"}</span>
+        <span class="t" id="dt-status">${s.degraded ? "Рыночные источники недоступны — работает симуляция" : "Данные в реальном времени · " + sourceLabel + " · спот"}</span>
         <span class="b num" id="dt-btc">BTC $${Fmt.fmtPrice(btc)}</span>
       </div>
     </header>`;
@@ -159,6 +187,7 @@ const App = (() => {
   function updateShell() {
     const s = Store.state;
     const btc = s.prices.BTC ? s.prices.BTC.price : 0;
+    const sourceLabel = s.degraded ? "симуляция" : (s.source || "подключение…");
     const set = (id, text, cls) => {
       const el = document.getElementById(id);
       if (!el) return;
@@ -170,10 +199,10 @@ const App = (() => {
     set("sb-btc", `BTC $${Fmt.fmtPrice(btc)}`);
     set("dt-btc", `BTC $${Fmt.fmtPrice(btc)}`);
     const live = document.getElementById("sb-live");
-    if (live) { live.textContent = s.degraded ? "симуляция" : "binance live"; live.className = s.degraded ? "live-deg" : "live-ok"; }
-    set("sb-status", s.degraded ? "Демо-симуляция" : "Реальные данные");
+    if (live) { live.textContent = sourceLabel; live.className = s.degraded ? "live-deg" : "live-ok"; }
+    set("sb-status", s.degraded ? "Демо-симуляция" : "Реальные данные · " + sourceLabel);
     const dt = document.getElementById("dt-status");
-    if (dt) dt.textContent = s.degraded ? "Binance недоступен — работает симуляция" : "Данные в реальном времени · Binance spot";
+    if (dt) dt.textContent = s.degraded ? "Рыночные источники недоступны — работает симуляция" : "Данные в реальном времени · " + sourceLabel + " · спот";
     // бейджи
     document.querySelectorAll(".nav-item[data-action=nav]").forEach((b) => {
       const id = b.getAttribute("data-arg");
@@ -234,8 +263,8 @@ const App = (() => {
     document.getElementById("root").innerHTML = `
     <div class="splash">
       <div class="splash-inner">
-        ${h.xenoMark(52)}
-        <div class="t"><span class="online-dot" style="background:var(--lime);width:6px;height:6px"></span> Загрузка платформы…</div>
+        <span class="mark-wrap spin-slow" style="display:inline-block">${h.xenoMark(52)}</span>
+        <div class="t"><span class="online-dot" style="background:var(--accent);width:6px;height:6px"></span> Загрузка платформы…</div>
       </div>
     </div>`;
     Store.switchUser();
@@ -247,7 +276,7 @@ const App = (() => {
   }
 
   // ---------- обработка действий ----------
-  function onAction(action, arg, ev) {
+  async function onAction(action, arg, ev) {
     const s = Store.state;
     switch (action) {
       case "nav": navigate(arg); break;
@@ -272,14 +301,168 @@ const App = (() => {
         h.closeModal();
         break;
       }
-      case "cabinet:reset": Store.resetDemo(); h.toast("success", "Демо-счёт сброшен"); h.closeModal(); break;
+      case "cabinet:reset": Store.resetDemo(); h.toast("success", "Демо-счёт сброшен", "Все сделки и статистики обнулены"); h.closeModal(); break;
+
+      // режимы: демо / реальный рынок
+      case "mode:demo":
+        Store.setMode("demo");
+        document.getElementById("root").innerHTML = shellHtml();
+        renderView();
+        h.toast("info", "Демо-торговля", "Виртуальные ХРЮ · реальные рыночные цены");
+        break;
+      case "mode:live": {
+        if (!(window.Live && Live.isConnected())) { h.showModal(ViewsTrade.liveModal(), { wide: true }); break; }
+        const mOut = Store.setMode("live");
+        if (!mOut.ok) { h.toast("error", mOut.error); h.showModal(ViewsTrade.liveModal(), { wide: true }); break; }
+        document.getElementById("root").innerHTML = shellHtml();
+        renderView();
+        h.toast("success", "Реальный рынок", "Ордера идут на биржу · средства остаются у вас");
+        break;
+      }
+
+      // реальный рынок: подключение
+      case "live:open": h.showModal(ViewsTrade.liveModal(), { wide: true }); break;
+      case "live:ex": s._liveEx = arg; h.showModal(ViewsTrade.liveModal(), { wide: true }); break;
+      case "live:disconnect":
+        Live.disconnect();
+        if (s.mode === "live") Store.setMode("demo");
+        h.showModal(ViewsTrade.liveModal(), { wide: true });
+        h.toast("info", "Подключение разорвано");
+        break;
+      case "live:wallet": {
+        if (!window.Live) break;
+        Live.state.lastError = null;
+        try {
+          const w = await Live.connectWallet();
+          h.toast("success", `Кошелёк подключён: ${w.address.slice(0, 6)}…${w.address.slice(-4)}`, "Баланс USDT читается из сети");
+          h.showModal(ViewsTrade.liveModal(), { wide: true });
+        } catch (e) {
+          Live.state.lastError = e.message || String(e);
+          h.toast("error", "Кошелёк не подключён", Live.state.lastError);
+          h.showModal(ViewsTrade.liveModal(), { wide: true });
+        }
+        break;
+      }
+      case "live:keys": {
+        if (!window.Live) break;
+        Live.state.lastError = null;
+        const kEl = document.getElementById("live-key");
+        const sEl = document.getElementById("live-secret");
+        const pEl = document.getElementById("live-pass");
+        const creds = Live.saveKeys(s._liveEx || "binance", (kEl && kEl.value || "").trim(), (sEl && sEl.value || "").trim(), (pEl && pEl.value || "").trim());
+        Live.__setCreds(creds);
+        h.toast("info", "Проверяю ключи…", "Подписанный запрос к балансу биржи");
+        try {
+          const bal = await Live.testKeys(creds);
+          h.toast("success", "Ключи работают", `USDT на бирже: ${Fmt.fmtNum(bal.usdt, 2)}`);
+          if (s.mode === "live" || confirm("Подключено. Переключиться в реальный режим сейчас?")) {
+            Store.setMode("live");
+            document.getElementById("root").innerHTML = shellHtml();
+            renderView();
+          }
+          h.showModal(ViewsTrade.liveModal(), { wide: true });
+        } catch (e) {
+          Live.state.lastError = e.message || String(e);
+          h.toast("error", "Ключи не приняты биржей", Live.state.lastError);
+          h.showModal(ViewsTrade.liveModal(), { wide: true });
+        }
+        break;
+      }
+      case "live:orders-toggle": {
+        if (!window.Live) break;
+        try {
+          Live.setOrdersEnabled(!Live.ordersAllowed());
+          h.toast(Live.ordersAllowed() ? "success" : "info", Live.ordersAllowed() ? "Отправка ордеров разрешена" : "Отправка ордеров запрещена");
+        } catch (e) { h.toast("error", e.message || String(e)); }
+        h.showModal(ViewsTrade.liveModal(), { wide: true });
+        break;
+      }
+
+      // реальный ордер (спот, маркет)
+      case "live:order": {
+        if (!window.Live || !Live.isConnected()) { h.toast("error", "Нет подключения", "Подключите кошелёк или биржу"); break; }
+        if (!Live.ordersAllowed()) { h.toast("error", "Отправка ордеров запрещена", "Подтвердите риск в окне «Управление подключением»"); h.showModal(ViewsTrade.liveModal(), { wide: true }); break; }
+        const f2 = s._form;
+        const price2 = (s.prices[f2.sym] && s.prices[f2.sym].price) || 0;
+        const amt = Number(String(f2.size).replace(",", ".")) || 0;
+        if (!price2) { h.toast("error", "Цена ещё загружается — секунду"); break; }
+        if (amt < 10) { h.toast("error", "Минимум 10 USDT"); break; }
+        const bal = Live.balanceUSDT();
+        if (bal != null && amt > bal) { h.toast("error", "Недостаточно USDT на бирже", `Доступно: ${Fmt.fmtNum(bal, 2)} USDT`); break; }
+        try {
+          const ord = await Live.placeOrder({ sym: DataLib.BY_SYM[f2.sym] ? DataLib.BY_SYM[f2.sym].pair : f2.sym + "USDT", side: f2.side, amountUSDT: amt, price: price2 });
+          Store.recordLiveOrder({ sym: ord.sym, side: ord.side, amountUSDT: ord.amountUSDT, exchange: ord.exchange }, "маркет");
+          h.toast("success", `Ордер отправлен: ${ord.sym} ${ord.side === "лонг" ? "BUY" : "SELL"}`, `${Fmt.fmtNum(amt)} USDT · ${ord.exchange}`);
+        } catch (e) {
+          h.toast("error", "Биржа не приняла ордер", e.message || String(e));
+        }
+        break;
+      }
+      case "live:order-ai": {
+        if (!s._ai || s._ai.res.verdict === "wait") { h.toast("error", "Сначала запустите ИИ-анализ"); break; }
+        s._form.side = s._ai.res.verdict;
+        s._form.size = "100";
+        h.toast("info", "Сигнал ИИ перенесён в форму", `Направление: ${s._ai.res.verdict} · укажите сумму USDT и отправьте ордер`);
+        renderView();
+        break;
+      }
+
+      // ИИ-сделка
+      case "ai:analyze": {
+        const sym = arg || s._form.sym || "BTC";
+        if (!Store.canTrade()) { h.toast("error", "Сделки может открывать только аккаунт David или Yura"); break; }
+        const bars = Store.getBars(sym, "15м");
+        if (!bars || bars.length < 60) {
+          Store.ensureBars(sym, "15м");
+          h.toast("info", `Собираю свечи ${sym}…`, "Нажмите «Проанализировать» ещё раз через пару секунд");
+          break;
+        }
+        const res = Engine.aiAnalyze(sym, bars);
+        if (!res) { h.toast("error", "Недостаточно данных для анализа", "Попробуйте ещё раз через несколько секунд"); break; }
+        s._ai = { sym, res, ts: Date.now() };
+        if (res.verdict === "wait") h.toast("info", "ИИ: сейчас входа нет", "Факторы разнонаправлены — лучше подождать");
+        else h.toast("success", `ИИ рекомендует: ${res.verdict.toUpperCase()} ${sym}`, `уверенность ${res.confidence}% · стоп/цель по ATR · RR 1:2`);
+        renderView();
+        break;
+      }
+      case "ai:open": {
+        if (s.mode === "live") { h.toast("info", "Реальный режим", "Используйте кнопку «Отправить рыночный ордер» под вердиктом ИИ"); break; }
+        if (!s._ai || s._ai.res.verdict === "wait") { h.toast("error", "Сначала запустите ИИ-анализ", "Кнопка «Проанализировать» в форме сделки"); break; }
+        const r = s._ai.res;
+        if (Date.now() - s._ai.ts > 240000) { h.toast("info", "Расчёт устарел", "Пересчитайте вердикт ИИ"); break; }
+        const size = Math.min(1000, Math.max(200, Math.round(s.balance * 0.1)), Math.round(s.balance));
+        if (size < 200) { h.toast("error", "Недостаточно хрювен", "Минимум для ИИ-сделки — 200 ХРЮ. Пополните счёт в кабинете"); break; }
+        const out = Store.placeDemo({ sym: r.sym, side: r.verdict, size, lev: 1, stop: r.stop, target: r.target, strategy: "ai", ai: { confidence: r.confidence, note: r.note } });
+        if (!out.ok) { h.toast("error", out.error); break; }
+        h.toast("success", `ИИ-сделка открыта: ${r.sym} ${r.verdict}`, `${Fmt.fmtNum(size)} ХРЮ · уверенность ${r.confidence}% · списано со счёта`);
+        break;
+      }
+
+      // ИИ-автопилот и сканер
+      case "ai:auto":
+        Store.toggleAiAuto();
+        renderView();
+        break;
+      case "ai:open-idea": {
+        const idea = (s.aiIdeas || []).find((i) => i.sym === arg);
+        if (!idea || idea.res.verdict === "wait") { h.toast("error", "Идея устарела — подождите пересчёта"); break; }
+        if (!Store.canTrade()) { h.toast("error", "Сделки может открывать только аккаунт David или Yura"); break; }
+        const sz = Math.min(1000, Math.max(200, Math.round(s.balance * 0.1)), Math.round(s.balance));
+        if (sz < 200) { h.toast("error", "Недостаточно хрювен", "Пополните демо-счёт в кабинете"); break; }
+        const ideaOut = Store.placeDemo({ sym: idea.sym, side: idea.res.verdict, size: sz, lev: 1, stop: idea.res.stop, target: idea.res.target, strategy: "ai", ai: { confidence: idea.res.confidence, note: idea.res.note } });
+        if (!ideaOut.ok) { h.toast("error", ideaOut.error); break; }
+        h.toast("success", `Идея ИИ взята: ${idea.sym} ${idea.res.verdict}`, `${Fmt.fmtNum(sz)} ХРЮ · уверенность ${idea.res.confidence}%`);
+        break;
+      }
 
       // сигналы
       case "sig:take": {
-        if (s.balance < 100) { h.toast("error", "Недостаточно хрювен", "Пополните демо-счёт в кабинете"); break; }
+        if (!Store.canTrade()) { h.toast("error", "Сделки может открывать только аккаунт David или Yura"); break; }
         const sym = arg;
-        Store.placeDemo({ sym, side: "лонг", size: 500, lev: 1 });
-        h.toast("success", `Сигнал взят в демо: ${sym}`, `500 ХРЮ по текущей цене ${Fmt.fmtPrice((s.prices[sym] && s.prices[sym].price) || 0)}`);
+        if (s.balance < 500) { h.toast("error", "Недостаточно хрювен", "Нужно 500 ХРЮ — пополните демо-счёт в кабинете"); break; }
+        const sigOut = Store.placeDemo({ sym, side: "лонг", size: 500, lev: 1 });
+        if (!sigOut.ok) { h.toast("error", sigOut.error); break; }
+        h.toast("success", `Сигнал взят в демо: ${sym}`, `500 ХРЮ списаны со счёта · цена ${Fmt.fmtPrice((s.prices[sym] && s.prices[sym].price) || 0)}`);
         break;
       }
 
@@ -306,14 +489,15 @@ const App = (() => {
       case "form:sym": s._form.sym = arg; renderView(); break;
       case "form:side": s._form.side = arg; renderView(); break;
       case "form:submit": {
+        if (s.mode === "live") { h.toast("info", "Реальный режим", "Нажмите кнопку отправки ордера под формой"); break; }
         const f = s._form;
         const price = (s.prices[f.sym] && s.prices[f.sym].price) || 0;
         const sizeNum = Number(String(f.size).replace(",", ".")) || 0;
         if (!price) { h.toast("error", "Цена ещё загружается — секунду"); break; }
         if (sizeNum < 10) { h.toast("error", "Минимум 10 ХРЮ"); break; }
-        if (sizeNum > s.balance) { h.toast("error", "Недостаточно хрювен на демо-счёте", `Доступно: ${Fmt.fmtNum(s.balance)} ХРЮ`); break; }
-        Store.placeDemo({ sym: f.sym, side: f.side, size: sizeNum, lev: f.lev });
-        h.toast("success", `${f.sym} ${f.side} ×${f.lev} открыт`, `${Fmt.fmtNum(sizeNum)} ХРЮ по реальной цене ${Fmt.fmtPrice(price)}`);
+        const out = Store.placeDemo({ sym: f.sym, side: f.side, size: Math.round(sizeNum), lev: f.lev });
+        if (!out.ok) { h.toast("error", out.error); break; }
+        h.toast("success", `${f.sym} ${f.side} открыт`, `${Fmt.fmtNum(Math.round(sizeNum))} ХРЮ списаны со счёта · цена ${Fmt.fmtPrice(price)}`);
         break;
       }
 
@@ -321,8 +505,9 @@ const App = (() => {
       case "trades:tab": s._tradesTab = arg === "мои" ? "user" : "lab"; renderView(); break;
       case "pos:close": {
         const pos = s.userPositions.find((p) => p.id === arg);
-        Store.closeDemo(arg);
-        if (pos) h.toast("success", `Позиция ${pos.sym} закрыта по рыночной цене`);
+        const cOut = Store.closeDemo(arg);
+        if (!cOut.ok) { h.toast("error", cOut.error); break; }
+        if (pos) h.toast("success", `Позиция ${pos.sym} закрыта по рыночной цене`, `${cOut.closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(cOut.closed.pnl)))} ХРЮ вернулись на счёт (после комиссии)`);
         break;
       }
 
@@ -375,11 +560,20 @@ const App = (() => {
         if (btn) {
           const f = Store.state._form;
           const sizeNum = Number(String(f.size).replace(",", ".")) || 0;
-          btn.innerHTML = `${f.side === "лонг" ? "Открыть лонг" : "Открыть шорт"} · ${sizeNum ? Fmt.fmtNum(sizeNum) : "0"} ХРЮ ×${f.lev}`;
+          btn.innerHTML = `${f.side === "лонг" ? "Открыть лонг" : "Открыть шорт"} · ${sizeNum ? Fmt.fmtNum(sizeNum) : "0"} ХРЮ`;
         }
       } else if (el.getAttribute && el.getAttribute("data-role") === "cab-balance") {
         const clean = el.value.replace(/[^\d.,\s]/g, "");
         if (clean !== el.value) el.value = clean;
+      }
+    });
+
+    document.addEventListener("change", (e) => {
+      const el = e.target;
+      if (el && el.id === "live-risk" && window.Live) {
+        Live.acceptRisk(el.checked);
+        h.toast("info", el.checked ? "Риск подтверждён" : "Подтверждение риска снято",
+          el.checked ? "Теперь можно разрешить отправку ордеров" : "Отправка ордеров запрещена");
       }
     });
 
@@ -392,6 +586,8 @@ const App = (() => {
   function boot() {
     bindEvents();
     Store.subscribe(scheduleRender);
+    if (window.Live) Live.onChange(() => { scheduleRender(); });
+    if (window.Binance) Binance.onSourceChange((id) => { Store.state.source = id; scheduleRender(); });
     if (Auth.readSession()) {
       afterLogin();
     } else {

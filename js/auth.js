@@ -90,11 +90,12 @@ const Auth = (() => {
     <div class="auth">
       <div class="auth-glow"><i class="g1"></i><i class="g2"></i><i class="g3"></i></div>
       <div class="auth-grid"></div>
+      <div class="auth-scan"></div>
       <div class="auth-inner">
         <div class="auth-logo">
-          ${h.xenoMark(58)}
+          <span class="mark-wrap">${h.xenoMark(58)}</span>
           <div class="auth-brand">
-            <span class="b1">Xeno<em>AI</em></span>
+            <span class="b1">Xeno<em class="neon-flicker">AI</em></span>
             <span class="b2">Trade</span>
           </div>
           <p class="auth-tagline">Платформа автоматического ИИ-трейдинга<br>по реальным данным Binance</p>

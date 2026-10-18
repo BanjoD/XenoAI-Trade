@@ -123,8 +123,8 @@ const ViewsTrade = (() => {
                 ? `<div id="candle-chart" style="height:460px"></div>`
                 : `<div style="position:relative"><div id="line-chart" style="height:460px"></div>
                     <div class="chart-legend">
-                      <span><span class="lg-line" style="background:${(p.chg24h || 0) >= 0 ? "#4ade80" : "#f87171"}"></span> Цена</span>
-                      <span><span class="lg-sq" style="background:#3b82f6"></span> Объём</span>
+                      <span><span class="lg-line" style="background:${(p.chg24h || 0) >= 0 ? "#ff4fa3" : "#f87171"}"></span> Цена</span>
+                      <span><span class="lg-sq" style="background:#a78bfa"></span> Объём</span>
                     </div></div>`)
               : `<div class="chart-ph">Загружаю свечи Binance…</div>`}
           </div>
@@ -132,7 +132,7 @@ const ViewsTrade = (() => {
           <div class="mkt-whales">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;font-size:12px;color:#71717a">
               <span>Что делали киты · реальные крупные сделки ${sym}</span>
-              <button class="link-btn" style="color:var(--lime)" data-action="mkt:whales-on">показать на графике</button>
+              <button class="link-btn" style="color:var(--accent-2)" data-action="mkt:whales-on">показать на графике</button>
             </div>
             ${whaleFeed}
           </div>
@@ -169,8 +169,8 @@ const ViewsTrade = (() => {
           if (el) {
             Charts.lineVolume(el, bars.map((b) => b.c), {
               volumes: bars.map((b) => b.v),
-              lineColor: (p.chg24h || 0) >= 0 ? "#4ade80" : "#f87171",
-              volColor: "#3b82f6",
+              lineColor: (p.chg24h || 0) >= 0 ? "#ff4fa3" : "#f87171",
+              volColor: "#a78bfa",
               timeLabels: bars.filter((_, i) => i % Math.floor(bars.length / 3) === 0).slice(0, 3).map((b) => {
                 const d = new Date(b.t * 60000);
                 return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
@@ -182,11 +182,86 @@ const ViewsTrade = (() => {
     };
   }
 
-  // ================= форма демо-сделки =================
+  // ================= блок ИИ-сделки =================
+  function aiBlock(sym) {
+    const s = S();
+    const live = s.mode === "live";
+    const fresh = s._ai && s._ai.sym === sym && (Date.now() - s._ai.ts < 240000) ? s._ai : null;
+
+    const head = `
+      <div class="ai-head">
+        <span class="ai-ico">${h.icon("sparkles", 17)}</span>
+        <div style="min-width:0;flex:1">
+          <div class="ai-title">Сделка на базе ИИ</div>
+          <div class="ai-sub">ML-ансамбль 7 индикаторов · спот · свечи 15м</div>
+        </div>
+        ${live ? "" : `<button class="ai-auto-pill ${s.aiAuto ? "on" : ""}" data-action="ai:auto" title="ИИ сам заходит в монеты и флипает">
+          <span class="d"></span> автопилот ${s.aiAuto ? "вкл" : "выкл"}
+        </button>`}
+      </div>`;
+
+    let body = "";
+    if (!fresh) {
+      body = `
+        <button class="ai-cta" data-action="ai:analyze" data-arg="${sym}">${h.icon("sparkles", 14)} Проанализировать ${sym} и дать вердикт</button>
+        <div class="ai-help">ИИ взвешивает тренд, RSI, MACD, Боллинджера, Ишимоку, объём и импульс, сам выбирает
+        направление, стоп и цель. Только спот: «лонг» — тренд вверх, «шорт» — тренд вниз. Мощная скам-защита:
+        в аномалии и низколиквидные монеты ИИ не заходит. ${live ? "В реальном режиме вердикт подскажет вход — ордер отправите кнопкой ниже." : "Автопилот может открывать и флипать сделки сам."}</div>`;
+    } else {
+      const r = fresh.res;
+      if (r.verdict === "wait") {
+        body = `
+        <div class="ai-verdict">
+          <div class="ai-v-head"><span class="ai-v-side" style="color:#d4cbd8">ожидание</span><span class="ai-v-sym">${sym} · 15м</span><span class="ai-conf-num">${r.confidence}%</span></div>
+          <div class="ai-conf"><i style="width:${r.confidence}%"></i></div>
+          <div class="ai-wait">ИИ не видит уверенного входа: ${h.esc(r.note)}.<br>Вход пропущен — капитал не рискует.</div>
+          <div class="ai-ts"><span>${Fmt.fmtClock(fresh.ts)}</span><button class="link-btn" data-action="ai:analyze" data-arg="${sym}">пересчитать</button></div>
+        </div>`;
+      } else {
+        const isLong = r.verdict === "лонг";
+        const size = Math.max(200, Math.min(1000, Math.round(s.balance * 0.1)));
+        const sizeStr = Fmt.fmtNum(Math.min(size, Math.max(0, Math.round(s.balance))));
+        const factorRows = r.factors.map((f) => {
+          const d = f.dir > 0 ? "up" : f.dir < 0 ? "down" : "flat";
+          const arrow = f.dir > 0 ? "▲" : f.dir < 0 ? "▼" : "•";
+          return `<div class="ai-factor"><span class="dir ${d}">${arrow}</span><span class="lbl">${h.esc(f.label)}</span><span class="det">${h.esc(f.detail)}</span></div>`;
+        }).join("");
+        body = `
+        <div class="ai-verdict ${isLong ? "long" : "short"}">
+          <div class="ai-v-head"><span class="ai-v-side">${r.verdict}</span><span class="ai-v-sym">${sym} · 15м</span><span class="ai-conf-num num">${r.confidence}%</span></div>
+          <div class="ai-conf"><i style="width:${r.confidence}%"></i></div>
+          <div class="ai-levels num">
+            <div><div class="k">вход</div><div>${fmtPrice(r.price)}</div></div>
+            <div><div class="k">стоп −${r.riskPct.toFixed(1)}%</div><div class="text-red">${fmtPrice(r.stop)}</div></div>
+            <div><div class="k">цель +${r.targetPct.toFixed(1)}%</div><div class="text-green">${fmtPrice(r.target)}</div></div>
+          </div>
+          <div class="ai-factors">${factorRows}</div>
+          ${live
+            ? `<button class="ai-open" data-action="live:order-ai">Отправить рыночный ордер по сигналу ИИ</button>`
+            : s.balance >= 200
+              ? `<button class="ai-open" data-action="ai:open">Открыть ${r.verdict} по сигналу ИИ · ${sizeStr} ХРЮ</button>`
+              : `<div class="ai-wait">Минимум для ИИ-сделки — 200 ХРЮ. Пополните демо-счёт в кабинете.</div>`}
+          <div class="ai-ts"><span>расчёт ${Fmt.fmtClock(fresh.ts)} · RR 1:2 · спот</span><button class="link-btn" data-action="ai:analyze" data-arg="${sym}">пересчитать</button></div>
+        </div>`;
+      }
+    }
+
+    return `<div class="ai-block">${head}${body}</div>`;
+  }
+
+  // ================= форма сделки (демо ХРЮ / реальный рынок) =================
   function tradeForm(defaultSym, compact) {
     const s = S();
     const f = s._form || (s._form = { sym: defaultSym, side: "лонг", size: "500", lev: 1 });
     if (defaultSym && !compact) f.sym = f.sym || defaultSym;
+
+    // ---- реальный режим ----
+    if (s.mode === "live") return liveForm(f);
+    return demoForm(f, compact);
+  }
+
+  function demoForm(f, compact) {
+    const s = S();
     const price = (s.prices[f.sym] && s.prices[f.sym].price) || 0;
     const sizeNum = Number(String(f.size).replace(",", ".")) || 0;
     const risk = price * 0.02;
@@ -197,24 +272,21 @@ const ViewsTrade = (() => {
       <button class="chip ${f.sym === i.sym ? "active" : ""}" style="padding:6px 10px;font-size:12px" data-action="form:sym" data-arg="${i.sym}">${h.coin(i.sym, 16)} ${i.sym}</button>`).join("") + `</div>`;
 
     return `<div class="tform">
+      ${aiBlock(f.sym)}
       <div class="tform-head">
         <span class="tform-title">Новая демо-сделка</span>
         <span class="tform-free num">свободно ${Fmt.fmtNum(s.balance)} ХРЮ</span>
       </div>
       ${syms}
       <div class="seg2">
-        <button class="seg-btn ${f.side === "лонг" ? "long-on" : ""}" data-action="form:side" data-arg="лонг">лонг</button>
-        <button class="seg-btn ${f.side === "шорт" ? "short-on" : ""}" data-action="form:side" data-arg="шорт">шорт</button>
+        <button class="seg-btn ${f.side === "лонг" ? "long-on" : ""}" data-action="form:side" data-arg="лонг">лонг · тренд вверх</button>
+        <button class="seg-btn ${f.side === "шорт" ? "short-on" : ""}" data-action="form:side" data-arg="шорт">шорт · тренд вниз</button>
       </div>
       <div class="tform-row">
         <div class="inp-wrap">
           <input class="inp num" id="form-size" data-role="form-size" value="${h.esc(f.size)}" inputmode="decimal" style="padding-left:36px">
           <span class="inp-hru">${h.hru(13)}</span>
           <span class="inp-suffix">ХРЮ</span>
-        </div>
-        <div class="lev-box">
-          <span class="lv num">×${f.lev}</span>
-          <input type="range" min="1" max="10" value="${f.lev}" data-role="form-lev" aria-label="Плечо">
         </div>
       </div>
       <div class="tform-stats num">
@@ -223,9 +295,60 @@ const ViewsTrade = (() => {
         <div><div class="k">цель +4%</div><div class="text-green">${fmtPrice(target)}</div></div>
       </div>
       <button class="btn-open ${f.side === "лонг" ? "long" : "short"}" data-action="form:submit">
-        ${f.side === "лонг" ? "Открыть лонг" : "Открыть шорт"} · ${sizeNum ? Fmt.fmtNum(sizeNum) : "0"} ХРЮ ×${f.lev}
+        ${f.side === "лонг" ? "Открыть лонг" : "Открыть шорт"} · ${sizeNum ? Fmt.fmtNum(sizeNum) : "0"} ХРЮ
       </button>
-      <p class="tform-note">Виртуальные хрювны · исполнение по реальной цене Binance</p>
+      <p class="tform-note">Спот · без плеча · виртуальные хрювны · исполнение по реальной рыночной цене</p>
+    </div>`;
+  }
+
+  // форма реального рынка: кошелёк/ключи → рыночный ордер со счёта биржи
+  function liveForm(f) {
+    const s = S();
+    const conn = window.Live ? Live.state.conn : null;
+    const price = (s.prices[f.sym] && s.prices[f.sym].price) || 0;
+    const usdt = Live.balanceUSDT();
+    const sizeNum = Number(String(f.size).replace(",", ".")) || 0;
+
+    const head = conn
+      ? `<div class="tform-head">
+          <span class="tform-title">Реальный ордер · спот</span>
+          <span class="tform-free num" style="color:var(--accent-2)">${h.esc(conn.label)}</span>
+        </div>
+        <div class="live-bal num">баланс биржи: ${usdt != null ? Fmt.fmtNum(usdt, 2) + " USDT" : "читаю…"}</div>`
+      : `<div class="tform-head">
+          <span class="tform-title">Реальный рынок</span>
+        </div>
+        <div class="ai-wait" style="margin-top:0;margin-bottom:8px">Нет подключения. Средства хранятся у вас на бирже/в кошельке — платформа только отправляет ордера от вашего имени.</div>
+        <button class="ai-cta" data-action="live:open">${h.icon("wallet", 14)} Подключить кошелёк или биржу</button>`;
+
+    if (!conn) return `<div class="tform">${aiBlock(f.sym)}${head}</div>`;
+
+    const syms = `<div class="chip-row scroll" style="margin-bottom:8px">` + DataLib.WATCHLIST.slice(0, 12).map((i) => `
+      <button class="chip ${f.sym === i.sym ? "active" : ""}" style="padding:6px 10px;font-size:12px" data-action="form:sym" data-arg="${i.sym}">${h.coin(i.sym, 16)} ${i.sym}</button>`).join("") + `</div>`;
+
+    return `<div class="tform">
+      ${aiBlock(f.sym)}
+      ${head}
+      ${syms}
+      <div class="seg2">
+        <button class="seg-btn ${f.side === "лонг" ? "long-on" : ""}" data-action="form:side" data-arg="лонг">купить · лонг</button>
+        <button class="seg-btn ${f.side === "шорт" ? "short-on" : ""}" data-action="form:side" data-arg="шорт">продать · выход</button>
+      </div>
+      <div class="tform-row">
+        <div class="inp-wrap">
+          <input class="inp num" id="form-size" data-role="form-size" value="${h.esc(f.size)}" inputmode="decimal" style="padding-left:12px">
+          <span class="inp-suffix">USDT</span>
+        </div>
+      </div>
+      <div class="tform-stats num">
+        <div><div class="k">цена</div><div style="color:#d4d4d8">${fmtPrice(price)}</div></div>
+        <div><div class="k">≈ объём</div><div style="color:#d4d4d8">${price && sizeNum ? fmtPrice(sizeNum / price) : "—"} ${f.sym}</div></div>
+        <div><div class="k">тип</div><div style="color:#d4d4d8">маркет</div></div>
+      </div>
+      <button class="btn-open ${f.side === "лонг" ? "long" : "short"}" data-action="live:order">
+        ${Live.ordersAllowed() ? `${f.side === "лонг" ? "Купить" : "Продать"} ${f.sym} · ${sizeNum ? Fmt.fmtNum(sizeNum) : "0"} USDT` : "Ордера запрещены — подтвердите риск"}
+      </button>
+      <p class="tform-note">Спот · без плеча · деньги на бирже, не на платформе · рыночный ордер по реальной цене</p>
     </div>`;
   }
 
@@ -245,7 +368,8 @@ const ViewsTrade = (() => {
             <div style="min-width:0;flex:1">
               <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px">
                 <span style="font-size:14px;font-weight:600">${p.sym}</span>
-                ${h.sideTag(p.side, p.lev)}
+                ${h.sideTag(p.side)}
+                ${p.strategy === "ai" ? h.tag("blue", p.ai && p.ai.auto ? "ИИ · автопилот" : "сигнал ИИ") : ""}
                 ${h.tag("orange", "в работе")}
               </div>
               <div class="num" style="margin-top:2px;font-size:11.5px;color:#71717a">${Fmt.fmtNum(p.size)} ХРЮ · вход ${fmtPrice(p.entry)} · стоп ${fmtPrice(p.stop)} · цель ${fmtPrice(p.target)} · ${Fmt.fmtHeld((Date.now() - p.openedAt) / 60000)}</div>
@@ -288,7 +412,7 @@ const ViewsTrade = (() => {
           return `<div class="trow" style="padding-top:12px;padding-bottom:12px">
             ${h.coin(c.sym, 30)}
             <div style="min-width:0;flex:1">
-              <div style="font-size:13px"><span style="font-weight:500">${c.sym}</span> <span style="color:#71717a">${c.side} ×${c.lev} · ${Fmt.fmtNum(c.size)} ХРЮ · ${strat ? strat.short : "вручную"}</span></div>
+              <div style="font-size:13px"><span style="font-weight:500">${c.sym}</span> <span style="color:#71717a">${c.side} · ${Fmt.fmtNum(c.size)} ХРЮ · ${c.strategy === "ai" ? (c.ai && c.ai.auto ? "ИИ · автопилот" : "сигнал ИИ") : strat ? strat.short : "вручную"}</span></div>
               <div class="num" style="font-size:11.5px;color:#52525b">${fmtPrice(c.entry)} → ${fmtPrice(c.exit)} · держали ${Fmt.fmtHeld((c.closedAt - c.openedAt) / 60000)}</div>
             </div>
             ${h.tag(c.exitReason === "Стоп" ? "red" : c.exitReason === "Цель" ? "green" : "gray", c.exitReason)}
@@ -327,11 +451,111 @@ const ViewsTrade = (() => {
             </div>
             ${closedRows}
           </section>
+
+          ${s.mode === "live" ? liveOrdersCard() : ""}
         </div>
         <aside>${tradeForm("BTC", false)}</aside>
       </div>
     </div>`;
     return { html, mount() {} };
+  }
+
+  // ================= реальные ордера (заготовка) =================
+  function liveOrdersCard() {
+    const s = S();
+    const rows = s.liveOrders.length === 0
+      ? `<div class="empty">Реальных ордеров ещё не было — отправьте первый из формы справа</div>`
+      : `<div class="rows row-divide">` + s.liveOrders.slice(0, 8).map((o) => `
+          <div class="trow">
+            ${h.coin(o.sym ? o.sym.replace("USDT", "") : "BTC", 30)}
+            <div style="min-width:0;flex:1">
+              <div style="font-size:13px"><span style="font-weight:500">${o.sym}</span> <span class="${o.side === "лонг" ? "text-green" : "text-red"}">${o.side === "лонг" ? "BUY" : "SELL"} · маркет</span> <span style="color:#71717a">· ${Fmt.fmtNum(Math.round(o.amountUSDT))} USDT</span></div>
+              <div class="num" style="font-size:11.5px;color:#52525b">${o.exchange} · ${Fmt.fmtClock(o.ts)}${o.note ? " · " + h.esc(o.note) : ""}</div>
+            </div>
+            ${h.tag("blue", "отправлен")}
+          </div>`).join("") + `</div>`;
+    return `
+    <section class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 20px;border-bottom:1px solid var(--border)">
+        <span style="font-size:13.5px;font-weight:500;color:#d4d4d8">Реальные ордера · спот</span>
+        <span class="num" style="font-size:11.5px;color:#71717a">${Live.ordersAllowed() ? "отправка разрешена" : "отправка запрещена (подтвердите риск)"}</span>
+      </div>
+      ${rows}
+    </section>`;
+  }
+
+  // ================= модалка «Реальный рынок» =================
+  function liveModal() {
+    const s = S();
+    const st = window.Live ? Live.state : { conn: null, riskAccepted: false, ordersEnabled: false, connecting: false, lastError: null };
+    const sel = s._liveEx || "binance";
+    const ex = (window.Live ? Live.EXCHANGES : []).find((e) => e.id === sel) || { id: "binance", name: "Binance", needsPass: false, note: "" };
+    const conn = st.conn;
+
+    const statusHtml = conn
+      ? `<div class="lm-conn ok">
+          <span class="online-dot"></span>
+          <div style="min-width:0;flex:1">
+            <div style="font-weight:600;font-size:13.5px">Подключено: ${h.esc(conn.label)}</div>
+            <div style="font-size:11.5px;color:#8d8098">${h.esc(conn.detail)}${conn.balanceUSDT != null ? ` · ${Fmt.fmtNum(conn.balanceUSDT, 2)} USDT` : ""}</div>
+          </div>
+          <button class="btn-ghost" data-action="live:disconnect">Отключить</button>
+        </div>`
+      : `<div class="lm-conn">${h.icon("lock", 14)}<span style="font-size:12.5px;color:#8d8098">Нет активного подключения — выберите способ ниже</span></div>`;
+
+    const walletCard = `
+      <div class="lm-card">
+        <div class="lm-card-head">${h.icon("wallet", 16)} Крипто-кошелёк</div>
+        <p class="lm-note">MetaMask / Rabby / OKX Wallet. Адрес, сеть и баланс USDT читаются прямо в браузере; сделки — через смарт-контракты DEX (шаг 2 интеграции).</p>
+        <button class="lm-btn" data-action="live:wallet" ${st.connecting ? "disabled" : ""}>${st.connecting ? "Подключаю…" : "Подключить кошелёк"}</button>
+      </div>`;
+
+    const keysCard = `
+      <div class="lm-card">
+        <div class="lm-card-head">${h.icon("lock", 16)} Ключи биржи</div>
+        <div class="lm-tabs">${(window.Live ? Live.EXCHANGES : [{ id: "binance", name: "Binance" }, { id: "bybit", name: "Bybit" }, { id: "okx", name: "OKX" }]).map((e) => `
+          <button class="chip ${e.id === sel ? "active" : ""}" style="padding:5px 12px;font-size:12px" data-action="live:ex" data-arg="${e.id}">${e.name}</button>`).join("")}</div>
+        <input class="auth-inp lm-inp" id="live-key" placeholder="API key" autocomplete="off">
+        <input class="auth-inp lm-inp" id="live-secret" type="password" placeholder="Secret" autocomplete="off">
+        ${ex.needsPass ? `<input class="auth-inp lm-inp" id="live-pass" type="password" placeholder="Passphrase (OKX)" autocomplete="off">` : ""}
+        <div class="lm-exnote">${h.esc(ex.note)}</div>
+        <button class="lm-btn" data-action="live:keys">Проверить ключи и подключить</button>
+      </div>`;
+
+    const riskHtml = `
+      <div class="lm-risk">
+        <div class="lm-card-head">${h.icon("shield", 16)} Безопасность</div>
+        <p class="lm-note">Деньги не хранятся на платформе — они остаются на вашей бирже/в кошельке. Ключи сохраняются
+        только в этом браузере и шлются напрямую на биржу. Рыночные спот-ордера без плеча.</p>
+        <label class="lm-check"><input type="checkbox" id="live-risk" ${st.riskAccepted ? "checked" : ""} data-action="live:risk">
+          Я понимаю риски реальной торговли и подтверждаю, что торгую собственными средствами</label>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:10px">
+          <span style="font-size:12px;color:#8d8098">Отправка ордеров:</span>
+          <button class="toggle-pill ${st.ordersEnabled ? "active" : ""}" data-action="live:orders-toggle">${st.ordersEnabled ? "разрешена" : "запрещена"}</button>
+        </div>
+      </div>`;
+
+    return `
+    <div>
+      <div class="cab-head">
+        <span class="cab-icon" style="background:rgba(255,45,120,.15);color:var(--accent-2)">${h.icon("candles", 22)}</span>
+        <div>
+          <h2 class="cab-title">Реальный рынок · подключение</h2>
+          <p class="cab-sub">Тумблер «Демо / Реальный» в сайдбаре переключает режимы · демо-ХРЮ не тратятся</p>
+        </div>
+      </div>
+      <div class="cab-body" style="display:flex;flex-direction:column;gap:12px">
+        ${statusHtml}
+        ${conn ? "" : `<div class="lm-grid">${walletCard}${keysCard}</div>`}
+        ${riskHtml}
+        ${st.lastError ? `<div class="auth-error" style="margin:0">${h.esc(st.lastError)}</div>` : ""}
+      </div>
+      <div class="cab-foot">
+        <p>Дорожная карта реальной торговли: 1) подключение — готово ✓ · 2) чтение баланса — готово ✓ ·
+        3) подписанные рыночные ордера Binance/Bybit/OKX — готово ✓ · 4) DEX-смарт-контракты и трекинг позиций — следующий шаг.</p>
+        <button class="btn-ghost" data-action="modal:close">Закрыть</button>
+      </div>
+    </div>`;
   }
 
   // ================= СЧЕТА =================
@@ -392,9 +616,10 @@ const ViewsTrade = (() => {
         ${h.sectionTitle("Как устроена лаборатория", `<span style="display:flex;align-items:center;gap:8px;font-size:12px;color:#71717a">${h.onlineDot()} работает на 15м свечах</span>`)}
         <p style="font-size:12.5px;line-height:1.7;color:#71717a">
           Каждый счёт получает стартовые 10 000 ХРЮ и торгует ровно одну стратегию: на сигнал движка открывает лонг
-          размером ~10% баланса, стоп — 1.2×ATR, цель — 2R. Дополнительный выход — по закрытию свечи ниже средней
-          Боллинджера. Результаты здесь настоящие, потому что считаются по реальным свечам Binance — валюта счёта
-          виртуальная, поэтому экспериментировать безопасно.
+          размером ~10% баланса, стоп — 1.2×ATR, цель — 2R. По умолчанию автоторговля выключена: сделки открываете
+          только вы — аккаунты David и Yura (форма на Рынке, сигнал ИИ или кнопка «Взять в демо» в Сигналах).
+          Если включить тумблер сверху, счета лаборатории начнут торговать сами. Результаты считаются по реальным
+          свечам Binance — валюта виртуальная, поэтому экспериментировать безопасно.
         </p>
       </section>
     </div>`;
@@ -438,20 +663,20 @@ const ViewsTrade = (() => {
           return `<div class="row" style="flex-wrap:wrap">
             ${h.coin(p.sym, 34)}
             <div style="min-width:0;flex:1">
-              <div style="font-size:13.5px;font-weight:600">${p.sym} <span style="font-size:11px;color:#71717a">${p.side} ×${p.lev}</span></div>
+              <div style="font-size:13.5px;font-weight:600">${p.sym} <span style="font-size:11px;color:#71717a">${p.side}${p.strategy === "ai" && p.ai && p.ai.auto ? " · ИИ-автопилот" : p.strategy === "ai" ? " · ИИ" : ""}</span></div>
               <div class="num" style="font-size:11.5px;color:#71717a">${Fmt.fmtNum(p.size)} ХРЮ · ${fmtPrice(p.entry)} → ${fmtPrice(price)}</div>
             </div>
             <div style="width:110px;text-align:right">
               <span class="num ${pnl >= 0 ? "text-green" : "text-red"}" style="font-size:13.5px;font-weight:500">${h.hruAmount(pnl, true)}</span>
               ${h.pctText(pct, "block")}
             </div>
-            ${Charts.spark(spark, { w: 70, h: 24, color: pct >= 0 ? "#4ade80" : "#f87171" })}
+            ${Charts.spark(spark, { w: 70, h: 24, color: pct >= 0 ? "#ff4fa3" : "#f87171" })}
             <button class="btn-close" data-action="pos:close" data-arg="${p.id}">Закрыть</button>
           </div>`;
         }).join("") + `</div>`;
 
     const donut = Charts.donut(
-      [{ value: Math.max(1, inTradesPct), color: "#f5c542" }, { value: Math.max(0, 100 - inTradesPct), color: "#a3e635" }],
+      [{ value: Math.max(1, inTradesPct), color: "#f5c542" }, { value: Math.max(0, 100 - inTradesPct), color: "#ff2d78" }],
       `<div style="font-size:11px;color:#71717a">в сделках</div><div class="num" style="font-size:18px;font-weight:600">${inTradesPct}%</div>`
     );
 
@@ -501,11 +726,13 @@ const ViewsTrade = (() => {
           <div style="display:flex;justify-content:center;padding:12px 0">${donut}</div>
           <div class="donut-legend">
             <div class="lr"><span style="display:flex;align-items:center;gap:8px;color:#a1a1aa"><span class="sw" style="background:#f5c542"></span> В позициях</span><span class="num" style="color:#e4e4e7">${Fmt.fmtNum(Math.round(inTrades))} ХРЮ</span></div>
-            <div class="lr"><span style="display:flex;align-items:center;gap:8px;color:#a1a1aa"><span class="sw" style="background:#a3e635"></span> Свободно</span><span class="num" style="color:#e4e4e7">${Fmt.fmtNum(Math.round(s.balance))} ХРЮ</span></div>
+            <div class="lr"><span style="display:flex;align-items:center;gap:8px;color:#a1a1aa"><span class="sw" style="background:#ff2d78"></span> Свободно</span><span class="num" style="color:#e4e4e7">${Fmt.fmtNum(Math.round(s.balance))} ХРЮ</span></div>
           </div>
           <div class="info-box">
-            ХРЮ — виртуальная валюта для безопасного теста движка. Когда демо-прогон устроит — переключимся на реальную
-            торговлю через биржевые API-ключи.
+            ХРЮ — виртуальная валюта для безопасного теста ИИ и стратегий: сделка списывает хрювны со счёта,
+            закрытие возвращает их с результатом (комиссия 0.1% учтена). В режиме «Реальный рынок» деньги не
+            попадают на платформу — они остаются на вашей бирже/в кошельке, а платформа только отправляет
+            подписанные рыночные ордера от вашего имени.
           </div>
         </aside>
       </div>
@@ -567,7 +794,7 @@ const ViewsTrade = (() => {
     </div>`;
   }
 
-  return { market, trades, accounts, portfolio, tradeForm, cabinet };
+  return { market, trades, accounts, portfolio, tradeForm, cabinet, liveModal, liveOrdersCard, aiBlock };
 })();
 
 window.ViewsTrade = ViewsTrade;

@@ -12,12 +12,13 @@ const Store = (() => {
     prices: {},
     bars: {},            // ключ `${sym}:${tf}`
     degraded: false,
+    source: null,        // рабочий источник данных: binance / bybit / okx / null (симуляция)
     lastSync: 0,
     signals: [],
     labAccounts: Engine.mkLabAccounts(),
     labPositions: [],
     labClosed: [],
-    autoTrade: true,
+    autoTrade: false, // автоторговля лаборатории по умолчанию выключена: сделки открывают только David и Yura
     events: [],
     whales: {},
     whaleScannedAt: {},
@@ -28,6 +29,10 @@ const Store = (() => {
     equityHist: [],
     started: false,
     activeSym: "BTC",
+    mode: "demo",       // demo | live (реальный рынок)
+    aiAuto: true,       // ИИ-автопилот: сам заходит в монеты и флипает, спот-only
+    aiIdeas: [],        // сканер ИИ: лучшие идеи по всем монетам
+    liveOrders: [],     // отправленные реальные ордера (заготовка реальной торговли)
   };
 
   WATCH_SYMS.forEach((sym, i) => {
@@ -39,10 +44,25 @@ const Store = (() => {
   function emit() { listeners.forEach((fn) => { try { fn(); } catch (e) { console.error(e); } }); }
 
   // ---------- персистентность ----------
+  // Версия v3: чистый старт — все сделки и статистики обнулены.
+  const STORAGE_VER = "xenoai_v3";
+  // Сделки может открывать только администратор David или Yura.
+  const TRADE_ACCOUNTS = ["david", "yura"];
   let persistTimer = null;
   function dataKey() {
     const login = Auth.sessionLogin();
-    return login ? `xenoai_v2_${login.toLowerCase()}` : "xenoai_v2_anon";
+    return login ? `${STORAGE_VER}_${login.toLowerCase()}` : `${STORAGE_VER}_anon`;
+  }
+  function wipeOldStorages() {
+    // одноразовая уборка демо-данных прошлой версии (xenoai_v2_*) — полный сброс сделок и статистик
+    try {
+      const kill = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && (k.indexOf("xenoai_v2_") === 0 || k.indexOf("xenoai_v1_") === 0)) kill.push(k);
+      }
+      kill.forEach((k) => localStorage.removeItem(k));
+    } catch (e) { /* noop */ }
   }
   function persist() {
     if (!Auth.sessionLogin()) return;
@@ -56,12 +76,14 @@ const Store = (() => {
           userPositions: s.userPositions, userClosed: s.userClosed.slice(0, 200),
           labAccounts: s.labAccounts, labPositions: s.labPositions, labClosed: s.labClosed.slice(0, 300),
           events: s.events.slice(0, 60), autoTrade: s.autoTrade, equityHist: s.equityHist.slice(-300),
+          mode: s.mode, aiAuto: s.aiAuto, liveOrders: s.liveOrders.slice(0, 50),
         };
         localStorage.setItem(dataKey(), JSON.stringify(data));
       } catch (e) { /* noop */ }
     }, 400);
   }
   function hydrate() {
+    wipeOldStorages();
     try {
       const raw = localStorage.getItem(dataKey());
       if (!raw) return;
@@ -76,6 +98,11 @@ const Store = (() => {
       if (Array.isArray(d.events)) state.events = d.events;
       if (Array.isArray(d.equityHist)) state.equityHist = d.equityHist;
       if (typeof d.autoTrade === "boolean") state.autoTrade = d.autoTrade;
+      if (d.mode === "demo" || d.mode === "live") state.mode = d.mode;
+      if (typeof d.aiAuto === "boolean") state.aiAuto = d.aiAuto;
+      if (Array.isArray(d.liveOrders)) state.liveOrders = d.liveOrders;
+      // в реальном режиме после перезагрузки страницы соединение надо перепроверить
+      if (state.mode === "live" && !(window.Live && Live.isConnected())) state.mode = "demo";
     } catch (e) { /* noop */ }
   }
   function switchUser() {
@@ -87,12 +114,20 @@ const Store = (() => {
     });
     state.bars = {}; state.degraded = false; state.lastSync = 0;
     state.signals = []; state.labAccounts = Engine.mkLabAccounts();
-    state.labPositions = []; state.labClosed = []; state.autoTrade = true;
+    state.labPositions = []; state.labClosed = []; state.autoTrade = false;
     state.events = []; state.whales = {}; state.whaleScannedAt = {};
     state.balance = 10000; state.startBalance = 10000;
     state.userPositions = []; state.userClosed = []; state.equityHist = [];
+    state._ai = null;
+    state.aiIdeas = []; state.liveOrders = [];
     state.started = started; state.activeSym = "BTC";
     hydrate();
+  }
+
+  // сделки может открывать/закрывать только аккаунт David или Yura
+  function canTrade() {
+    const login = Auth.sessionLogin();
+    return Boolean(login && TRADE_ACCOUNTS.indexOf(login.toLowerCase()) !== -1);
   }
 
   function pushEvent(e) {
@@ -137,38 +172,44 @@ const Store = (() => {
   }
 
   function placeDemo(p) {
+    if (!canTrade()) return { ok: false, error: "Сделки может открывать только аккаунт David или Yura" };
     const price = state.prices[p.sym] && state.prices[p.sym].price;
-    if (!price || p.size <= 0) return;
-    const margin = Math.min(p.size, state.balance);
-    if (margin <= 0) return;
-    const risk = price * 0.02; // стоп −2%
+    if (!price) return { ok: false, error: "Цена ещё не загружена — попробуйте через секунду" };
+    const margin = Math.round(Number(p.size) || 0);
+    if (!(margin > 0)) return { ok: false, error: "Некорректный размер сделки" };
+    if (margin > state.balance) return { ok: false, error: `Недостаточно хрювен: свободно ${Fmt.fmtNum(state.balance)} ХРЮ` };
+    const risk = price * 0.02; // стоп −2% по умолчанию (ИИ передаёт свои уровни)
     const pos = {
-      id: `u${Date.now()}`, owner: "user", strategy: "manual", sym: p.sym, side: p.side,
-      size: margin, lev: p.lev, entry: price,
-      stop: p.side === "лонг" ? price - risk : price + risk,
-      target: p.side === "лонг" ? price + risk * 2 : price - risk * 2,
+      id: `u${Date.now()}`, owner: "user", strategy: p.strategy || "manual", sym: p.sym, side: p.side,
+      size: margin, lev: p.lev || 1, entry: price,
+      stop: p.stop || (p.side === "лонг" ? price - risk : price + risk),
+      target: p.target || (p.side === "лонг" ? price + risk * 2 : price - risk * 2),
       openedAt: Date.now(),
+      ai: p.ai || null,
     };
+    // ХРЮ реально списываются со счёта в момент открытия
     state.balance -= margin;
     state.userPositions = [pos, ...state.userPositions];
     pushEvent({
       tone: p.side === "лонг" ? "bull" : "bear",
-      title: `Демо-сделка открыта: ${p.sym} ${p.side} ×${p.lev}`,
-      detail: `${Fmt.fmtNum(margin)} ХРЮ по реальной цене ${price.toPrecision(6)}`,
+      title: p.strategy === "ai" ? `ИИ-сделка открыта: ${p.sym} ${p.side} ×${pos.lev}` : `Демо-сделка открыта: ${p.sym} ${p.side} ×${pos.lev}`,
+      detail: `${Fmt.fmtNum(margin)} ХРЮ по реальной цене ${price.toPrecision(6)}${p.ai ? ` · уверенность ИИ ${p.ai.confidence}%` : ""}`,
       sym: p.sym,
     });
     persist();
     emit();
+    return { ok: true, pos };
   }
 
   function closeDemo(id) {
+    if (!canTrade()) return { ok: false, error: "Закрывать сделки может только аккаунт David или Yura" };
     const pos = state.userPositions.find((p) => p.id === id);
-    if (!pos) return;
+    if (!pos) return { ok: false, error: "Позиция не найдена" };
     const price = (state.prices[pos.sym] && state.prices[pos.sym].price) || pos.entry;
     const closed = Engine.closeTrade(pos, price, "Вручную");
     state.userPositions = state.userPositions.filter((p) => p.id !== id);
     state.userClosed = [closed, ...state.userClosed].slice(0, 300);
-    state.balance += pos.size + closed.pnl;
+    state.balance += pos.size + closed.pnl; // возврат маржи + результат (уже после комиссии 0.1%)
     pushEvent({
       tone: closed.pnl >= 0 ? "bull" : "bear",
       title: `Демо-сделка закрыта: ${pos.sym} ${closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))} ХРЮ`,
@@ -177,6 +218,7 @@ const Store = (() => {
     });
     persist();
     emit();
+    return { ok: true, closed };
   }
 
   function setBalance(v) {
@@ -190,11 +232,109 @@ const Store = (() => {
     state.userPositions = []; state.userClosed = [];
     state.labAccounts = Engine.mkLabAccounts();
     state.labPositions = []; state.labClosed = []; state.equityHist = [];
-    pushEvent({ tone: "neutral", title: "Демо-счёт сброшен", detail: "Позиции и история очищены" });
+    state._ai = null;
+    pushEvent({ tone: "neutral", title: "Демо-счёт сброшен", detail: "Все сделки и статистики обнулены" });
     persist(); emit();
   }
 
   function toggleAuto() { state.autoTrade = !state.autoTrade; persist(); emit(); }
+
+  // ---------- режимы: демо / реальный рынок ----------
+  function setMode(mode) {
+    if (mode === "live" && !(window.Live && Live.isConnected())) return { ok: false, error: "Сначала подключите кошелёк или ключи биржи" };
+    if (state.mode === mode) return { ok: true };
+    state.mode = mode;
+    pushEvent({ tone: "neutral", title: mode === "live" ? "Включён реальный рынок" : "Включена демо-торговля", detail: mode === "live" ? "Ордера идут на биржу от вашего имени · средства на бирже" : "Виртуальные ХРЮ · реальные цены" });
+    persist(); emit();
+    return { ok: true };
+  }
+
+  function recordLiveOrder(order, note) {
+    state.liveOrders = [{ ...order, note: note || "", ts: Date.now() }, ...state.liveOrders].slice(0, 50);
+    pushEvent({ tone: order.side === "лонг" ? "bull" : "bear", title: `Реальный ордер отправлен: ${order.sym} ${order.side === "лонг" ? "BUY" : "SELL"}`, detail: `${Fmt.fmtNum(Math.round(order.amountUSDT))} USDT · ${order.exchange}` });
+    persist(); emit();
+  }
+
+  // ---------- ИИ-автопилот (спот-only) ----------
+  // Тапович: спот без фьючерсов; ИИ заходит в любые монеты с потенциалом, мощная защита
+  // от скама, флипает когда сам посчитает нужным, ультра-быстрые выходы.
+  const AI_CONF_MIN = 76;    // порог входа автопилота
+  const AI_FLIP_CONF = 70;   // порог флипа
+  const AI_MAX_POS = 5;      // максимум одновременных ИИ-позиций
+  function scamFilter(sym) {
+    const p = state.prices[sym];
+    if (!p || !p.price) return { ok: false, why: "нет цены" };
+    if (p.vol24 && p.vol24 < 3e6) return { ok: false, why: `низкий объём $${(p.vol24 / 1e6).toFixed(1)}M` };
+    if (Math.abs(p.chg24h) > 35) return { ok: false, why: `аномалия 24ч ${p.chg24h > 0 ? "+" : "−"}${Math.abs(p.chg24h).toFixed(0)}%` };
+    return { ok: true };
+  }
+
+  function updateIdeas(sym, res, guard) {
+    const rest = state.aiIdeas.filter((i) => i.sym !== sym);
+    if (res.verdict !== "wait") rest.push({ sym, res, guard, ts: Date.now() });
+    rest.sort((a, b) => b.res.confidence - a.res.confidence);
+    state.aiIdeas = rest.slice(0, 8);
+  }
+
+  function aiOpenInternal(res, size, isAuto, guardWhy) {
+    const out = placeDemo({
+      sym: res.sym, side: res.verdict, size, lev: 1,
+      stop: res.stop, target: res.target, strategy: "ai",
+      ai: { confidence: res.confidence, note: res.note, auto: !!isAuto },
+    });
+    if (out.ok && isAuto) {
+      pushEvent({
+        tone: res.verdict === "лонг" ? "bull" : "bear",
+        title: `ИИ-автопилот вошёл: ${res.sym} ${res.verdict} ${res.confidence}%`,
+        detail: `${Fmt.fmtNum(size)} ХРЮ · спот · защита: ${guardWhy} · стоп/цель по ATR`,
+        sym: res.sym,
+      });
+    }
+    return out;
+  }
+
+  function aiAutoStep(sym, bars) {
+    if (!state.aiAuto || !bars || bars.length < 60) return;
+    const res = Engine.aiAnalyze(sym, bars);
+    if (!res) return;
+    const guard = scamFilter(sym);
+    updateIdeas(sym, res, guard);
+
+    const aiPos = state.userPositions.find((p) => p.sym === sym && p.strategy === "ai");
+    const aiCount = state.userPositions.filter((p) => p.strategy === "ai").length;
+
+    // флип: ИИ сам считает нужным развернуться (спот: продажа/выход в кэш)
+    if (aiPos && res.verdict !== "wait" && res.verdict !== aiPos.side && res.confidence >= AI_FLIP_CONF) {
+      const price = (state.prices[sym] && state.prices[sym].price) || aiPos.entry;
+      const closed = Engine.closeTrade(aiPos, price, "ИИ-флип");
+      state.userPositions = state.userPositions.filter((p) => p.id !== aiPos.id);
+      state.userClosed = [closed, ...state.userClosed].slice(0, 300);
+      state.balance += closed.size + closed.pnl;
+      pushEvent({
+        tone: res.verdict === "лонг" ? "bull" : "bear",
+        title: `ИИ флипнул ${sym}: ${aiPos.side} → ${res.verdict}`, detail: `закрыто по ${closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))} ХРЮ · разворот факторов`, sym,
+      });
+      const size = Math.min(1500, Math.max(200, Math.round(state.balance * 0.1)));
+      if (guard.ok && state.balance >= 300 && size >= 200) aiOpenInternal(res, size, true, guard.ok ? "ок" : guard.why);
+      persist();
+      return;
+    }
+
+    // вход: сильный сигнал + защита прошла + лимит позиций + свободные ХРЮ
+    if (!aiPos && res.verdict !== "wait" && res.confidence >= AI_CONF_MIN && aiCount < AI_MAX_POS) {
+      if (!guard.ok) return;
+      const size = Math.min(1500, Math.max(200, Math.round(state.balance * 0.1)));
+      if (state.balance < 300 || size < 200) return;
+      aiOpenInternal(res, size, true, "скам-фильтр ок");
+      persist();
+    }
+  }
+
+  function toggleAiAuto() {
+    state.aiAuto = !state.aiAuto;
+    pushEvent({ tone: "neutral", title: state.aiAuto ? "ИИ-автопилот включён" : "ИИ-автопилот выключен", detail: state.aiAuto ? "ИИ сам заходит в монеты и флипает · спот" : "ИИ только сканирует и подсказывает" });
+    persist(); emit();
+  }
 
   function totalEquity() {
     let v = state.balance;
@@ -256,6 +396,9 @@ const Store = (() => {
   function engineStep(sym, bars) {
     if (!bars || !bars.length) return;
     const price = (state.prices[sym] && state.prices[sym].price) || bars[bars.length - 1].c;
+
+    // 0) ИИ-автопилот: сканер всех монет, входы, флипы (спот-only, со скам-фильтром)
+    try { aiAutoStep(sym, bars); } catch (e) { console.error(e); }
 
     // 1) сигналы стратегий
     for (const strat of Engine.STRATEGIES) {
@@ -395,6 +538,7 @@ const Store = (() => {
         }
         state.degraded = false;
         state.lastSync = now;
+        state.source = Binance.sourceName();
         if (simTimer) { clearInterval(simTimer); simTimer = null; }
         emit();
       } catch (e) {
@@ -446,7 +590,8 @@ const Store = (() => {
   return {
     state, subscribe, emit, start, getBars, ensureBars,
     placeDemo, closeDemo, setBalance, resetDemo, toggleAuto,
-    loadWhales, setActiveSym, totalEquity, switchUser,
+    loadWhales, setActiveSym, totalEquity, switchUser, canTrade,
+    setMode, toggleAiAuto, recordLiveOrder,
   };
 })();
 
