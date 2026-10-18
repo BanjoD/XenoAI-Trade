@@ -23,7 +23,12 @@ const Store = (() => {
     labAccounts: Engine.mkLabAccounts(),
     labPositions: [],
     labClosed: [],
-    autoTrade: false, // автоторговля лаборатории по умолчанию выключена: сделки открывают только David и Yura
+    // автоторговля лаборатории ВКЛЮЧЕНА по умолчанию: сигналы движка принимаются
+    // счетами стратегий автоматически (запрос пользователя — «предложения в сигналах
+    // висят, приходится принимать вручную»). Лабораторные сделки живут внутри своих
+    // 10 000 ХРЮ и не трогают баланс владельца; выключить можно тумблером в «Счетах».
+    autoTrade: true,
+    labAutoMigrated: false, // одноразовая миграция: старые аккаунты с autoTrade=false переводятся на вкл (один раз)
     events: [],
     whales: {},
     whaleScannedAt: {},
@@ -52,6 +57,10 @@ const Store = (() => {
     lastCatchUp: 0,     // когда платформа последний раз «догоняла» рынок после офлайна
     lastScanAt: 0,      // хартбит ИИ-сканера: время последнего прогона движка по монете
     rev: 0,             // ревизия состояния: растёт с каждой записью (для слияния синка устройств)
+    aiCooldownUntil: 0, // пауза автопилота после серии минусов (до какого времени новые входы закрыты)
+    aiCooldownSeen: 0,  // длина серии, на которую пауза УЖЕ отработана (иначе пауза продлевала бы сама себя вечно)
+    clearedU: [],       // «могилки» очищенной истории пользователя (id удалённых закрытых сделок) — чтобы облако не воскресило их
+    clearedL: [],       // «могилки» очищенной истории лаборатории
     sync: { code: null, enabled: false, lastPush: 0, lastPull: 0, lastError: null, lastSeenRev: 0, sawRemote: false }, // синхронизация устройств
   };
 
@@ -301,11 +310,13 @@ const Store = (() => {
       balance: s.balance, startBalance: s.startBalance,
       userPositions: s.userPositions, userClosed: s.userClosed.slice(0, 400),
       labAccounts: s.labAccounts, labPositions: s.labPositions, labClosed: s.labClosed.slice(0, 400),
-      events: s.events.slice(0, 80), autoTrade: s.autoTrade, equityHist: s.equityHist.slice(-300),
+      events: s.events.slice(0, 80), autoTrade: s.autoTrade, labAutoMigrated: true, equityHist: s.equityHist.slice(-300),
       mode: s.mode, aiAuto: s.aiAuto, aiAutoLive: s.aiAutoLive, liveOrders: s.liveOrders.slice(0, 50),
       aiSession: s.aiSession, aiStop: s.aiStop, aiThreshold: s.aiThreshold, aiMaxPos: s.aiMaxPos,
       maxDeal: s.maxDeal, maxTotal: s.maxTotal, aiPosMode: s.aiPosMode,
       lastCatchUp: s.lastCatchUp, lastScanAt: s.lastScanAt,
+      aiCooldownUntil: s.aiCooldownUntil || 0, aiCooldownSeen: s.aiCooldownSeen || 0,
+      clearedU: (s.clearedU || []).slice(-800), clearedL: (s.clearedL || []).slice(-800),
       // идеи сканера сохраняются: после перезапуска вкладки «Сигналы» сразу полные,
       // а не ждут 45с, пока сканер обойдёт все монеты заново
       aiIdeas: s.aiIdeas.slice(0, 8).map((i) => ({
@@ -346,7 +357,11 @@ const Store = (() => {
     if (Array.isArray(d.labClosed)) state.labClosed = d.labClosed;
     if (Array.isArray(d.events)) state.events = d.events;
     if (Array.isArray(d.equityHist)) state.equityHist = d.equityHist;
-    if (typeof d.autoTrade === "boolean") state.autoTrade = d.autoTrade;
+    // автоторговля лаборатории: для старых аккаунтов (без метки миграции) одноразово
+    // включаем — сигналы принимаются сами (запрос пользователя); после миграции
+    // уважаем то, что выставлено тумблером в «Счетах»
+    if (typeof d.autoTrade === "boolean") state.autoTrade = d.labAutoMigrated ? d.autoTrade : true;
+    state.labAutoMigrated = true;
     if (d.mode === "demo" || d.mode === "live") state.mode = d.mode;
     if (typeof d.aiAuto === "boolean") state.aiAuto = d.aiAuto;
     if (typeof d.aiAutoLive === "boolean") state.aiAutoLive = d.aiAutoLive;
@@ -360,6 +375,21 @@ const Store = (() => {
     if (d.aiPosMode === "auto" || (typeof d.aiPosMode === "number" && d.aiPosMode >= 1 && d.aiPosMode <= 8)) state.aiPosMode = d.aiPosMode;
     if (typeof d.lastCatchUp === "number" && d.lastCatchUp > 0) state.lastCatchUp = d.lastCatchUp;
     if (typeof d.lastScanAt === "number" && d.lastScanAt > 0) state.lastScanAt = d.lastScanAt;
+    // пауза автопилота после серии минусов: персистентна, чтобы перезагрузка страницы
+    // не обнуляла её и не ставила заново (пауза честно отработана — серия зафиксирована)
+    if (typeof d.aiCooldownUntil === "number" && d.aiCooldownUntil > 0) state.aiCooldownUntil = d.aiCooldownUntil;
+    if (typeof d.aiCooldownSeen === "number" && d.aiCooldownSeen > 0) state.aiCooldownSeen = d.aiCooldownSeen;
+    // могилки очищенной истории: удалённое не имеет права воскреснуть из старого архива
+    if (Array.isArray(d.clearedU)) state.clearedU = d.clearedU.slice(-800);
+    if (Array.isArray(d.clearedL)) state.clearedL = d.clearedL.slice(-800);
+    if (state.clearedU.length) {
+      const tomb = new Set(state.clearedU);
+      state.userClosed = (state.userClosed || []).filter((c) => !tomb.has(c.id));
+    }
+    if (state.clearedL.length) {
+      const tombL = new Set(state.clearedL);
+      state.labClosed = (state.labClosed || []).filter((c) => !tombL.has(c.id));
+    }
     // восстановление идей сканера: проверяем структуру, чтобы чужой/битый архив не сломал рендер
     if (Array.isArray(d.aiIdeas)) {
       state.aiIdeas = d.aiIdeas.filter((i) => i && i.sym && i.res && typeof i.res.verdict === "string" && typeof i.res.confidence === "number")
@@ -413,7 +443,7 @@ const Store = (() => {
     });
     state.bars = {}; state.degraded = false; state.lastSync = 0;
     state.signals = []; state.labAccounts = Engine.mkLabAccounts();
-    state.labPositions = []; state.labClosed = []; state.autoTrade = false;
+    state.labPositions = []; state.labClosed = []; state.autoTrade = true; state.labAutoMigrated = false;
     state.events = []; state.whales = {}; state.whaleScannedAt = {};
     state.balance = 10000; state.startBalance = 10000;
     state.userPositions = []; state.userClosed = []; state.equityHist = [];
@@ -425,6 +455,8 @@ const Store = (() => {
     state.aiPosMode = "auto"; state.maxDeal = 1000; state.maxTotal = 5000;
     state.aiAutoLive = false; // в реальном режиме автопилот всегда стартует выключенным
     state.lastCatchUp = 0; state.rev = 0; state.updatedAt = 0;
+    state.aiCooldownUntil = 0; state.aiCooldownSeen = 0;
+    state.clearedU = []; state.clearedL = [];
     state.sync = { code: null, enabled: false, lastPush: 0, lastPull: 0, lastError: null, lastSeenRev: 0, sawRemote: false };
     // sync-рантайм перезапускается для нового пользователя: метаданные читаются заново,
     // авто-включение синка срабатывает для его аккаунта (initSyncRuntime — одноразовый)
@@ -511,6 +543,18 @@ const Store = (() => {
     const seenE = new Set((out.events || []).map((e) => e.id));
     (other.events || []).forEach((e) => { if (e && e.id && !seenE.has(e.id)) out.events.push(e); });
     out.events = (out.events || []).sort((x, y) => (y.ts || 0) - (x.ts || 0)).slice(0, 80);
+    // могилки очистки истории объединяются с обеих сторон: удалённое на любом
+    // устройстве не воскресает из архива другого устройства или облака
+    out.clearedU = Array.from(new Set([...(a.clearedU || []), ...(b.clearedU || [])])).slice(-800);
+    out.clearedL = Array.from(new Set([...(a.clearedL || []), ...(b.clearedL || [])])).slice(-800);
+    if (out.clearedU.length) {
+      const tombU = new Set(out.clearedU);
+      out.userClosed = (out.userClosed || []).filter((c) => !tombU.has(c.id));
+    }
+    if (out.clearedL.length) {
+      const tombL = new Set(out.clearedL);
+      out.labClosed = (out.labClosed || []).filter((c) => !tombL.has(c.id));
+    }
     out.rev = Math.max(a.rev || 0, b.rev || 0);
     out.updatedAt = Math.max(a.updatedAt || 0, b.updatedAt || 0);
     return out;
@@ -608,11 +652,14 @@ const Store = (() => {
     if (!a || typeof a !== "object") return "";
     const c0 = (a.userClosed || [])[0] || {};
     const e0 = (a.events || [])[0] || {};
+    const cu = a.clearedU || [], cl = a.clearedL || [];
     return [
       a.balance,
       (a.userPositions || []).map((p) => p.id).sort().join(","),
       (a.userClosed || []).length + ":" + (c0.id || ""),
       (a.events || []).length + ":" + (e0.id || ""),
+      cu.length + ":" + (cu.length ? cu[cu.length - 1] : ""),
+      cl.length + ":" + (cl.length ? cl[cl.length - 1] : ""),
       a.maxDeal, a.maxTotal, a.aiThreshold, a.aiPosMode,
       a.mode, a.autoTrade ? 1 : 0, a.aiAuto ? 1 : 0, a.aiAutoLive ? 1 : 0,
     ].join("|");
@@ -777,18 +824,70 @@ const Store = (() => {
   }
 
   // журнал диагностики: ошибки платформы не теряются молча, а попадают в ленту
-  // (с троттлингом) — на экране «События» видно, что именно сломалось и когда
-  let lastDiagAt = 0, diagCount = 0;
+  // (с троттлингом и дедупликацией) — на экране «События» видно, что именно сломалось.
+  // ЧУЖИЕ ошибки в ленту не попадают: если в стеке нет ни одного файла платформы,
+  // ошибку выбросило расширение браузера или инъекция хостинга — чинить её мы не
+  // можем, а пользователя она только пугает (реальный кейс: «Cannot read properties
+  // of undefined (reading 'M_ID')» — 259 раз за сессию; в коде платформы «M_ID»
+  // не встречается НИ РАЗУ, источник — посторонний скрипт в браузере).
+  let lastDiagAt = 0, diagCount = 0, foreignCount = 0;
+  const OUR_SRC_RE = /(?:\/js\/|js\/[a-z]+\.js|sw\.js|guardian\.js|tools\/|index\.html|404\.html|file:\/\/|localhost|127\.0\.0\.1|space-z\.ai|github\.io|githubusercontent\.com|vercel\.app|pages\.dev)/i;
+  const diagSeen = new Map(); // сигнатура сбоя → { n, lastAt }: один и тот же сбой не спамит ленту
   function diagError(where, err) {
     diagCount++;
+    const stack = err && typeof err.stack === "string" ? err.stack : "";
+    if (stack && !OUR_SRC_RE.test(stack)) {
+      // чужой скрипт (расширение/инъекция): считаем молча, пользователя не пугаем
+      foreignCount++;
+      try { console.info("[xenoai] ошибка постороннего скрипта (не платформа) в «" + where + "»:", err && err.message || err); } catch (e) { /* noop */ }
+      return;
+    }
+    const raw = String((err && err.message) || err || "неизвестная ошибка");
+    const human = raw.indexOf("Failed to fetch") !== -1
+      ? "источник данных не ответил (сеть) — повторим при следующем прогоне"
+      : raw;
+    const sig = where + "|" + human.slice(0, 80);
     const now = Date.now();
-    if (now - lastDiagAt < 60000) return; // не спамим ленту: не чаще раза в минуту
-    lastDiagAt = now;
+    if (diagSeen.size > 40) diagSeen.clear();
+    const seen = diagSeen.get(sig) || { n: 0, lastAt: 0 };
+    seen.n++;
+    diagSeen.set(sig, seen);
+    if (now - lastDiagAt < 45000) return;          // не чаще раза в 45 секунд
+    if (seen.n > 1 && now - seen.lastAt < 20 * 60000) return; // тот же сбой уже показан — копим счётчик молча
+    lastDiagAt = now; seen.lastAt = now;
     pushEvent({
       tone: "bear",
       title: `Самодиагностика: сбой в «${where}» — работа продолжается`,
-      detail: String((err && err.message) || err || "неизвестная ошибка").slice(0, 180) + ` · сбоев за сессию: ${diagCount} · данные не пострадали`,
+      detail: human.slice(0, 160) + (seen.n > 1 ? ` · повторов: ${seen.n}` : "") + ` · сбоев за сессию: ${diagCount} · данные не пострадали`,
     });
+  }
+
+  // ---------- очистка истории закрытых сделок (запрос пользователя) ----------
+  // Удалённое не просто исчезает локально: id попадают в «могилки» (clearedU/clearedL),
+  // которые едут в облако и объединяются при синке — иначе union-слияние архивов
+  // воскресило бы удалённые сделки из облака или с другого устройства.
+  function clearClosedHistory(which) {
+    if (!canTrade()) return { ok: false, error: "Историю может очищать только аккаунт David или Yura" };
+    const isUser = which !== "lab";
+    const list = isUser ? state.userClosed : state.labClosed;
+    const n = list.length;
+    if (!n) return { ok: false, error: "История закрытых сделок и так пуста" };
+    if (isUser) {
+      state.clearedU = Array.from(new Set([...(state.clearedU || []), ...list.map((c) => c.id)])).slice(-800);
+      state.userClosed = [];
+    } else {
+      state.clearedL = Array.from(new Set([...(state.clearedL || []), ...list.map((c) => c.id)])).slice(-800);
+      state.labClosed = [];
+    }
+    pushEvent({
+      tone: "neutral",
+      title: `История закрытых сделок очищена: удалено ${n}`,
+      detail: (isUser ? "ваша история закрытых сделок" : "история закрытых сделок лаборатории")
+        + " · баланс и открытые позиции не тронуты · память ИИ сохранена · после синхронизации история очистится и на других устройствах",
+    });
+    persist();
+    emit();
+    return { ok: true, n };
   }
 
   // первый запуск аккаунта: приветственная лента вместо пустого экрана
@@ -1417,18 +1516,28 @@ const Store = (() => {
 
     // серия минусов: принудительная пауза автопилота на 30 минут (защита от тильт-режима).
     // Выходы и флипы продолжают обслуживаться — пауза только на НОВЫЕ входы.
-    if (Date.now() < (state._aiCooldownUntil || 0)) return;
-    if (aiLossStreak() >= 3) {
-      state._aiCooldownUntil = Date.now() + 30 * 60000;
+    // ВАЖНО: пауза ставится ОДИН РАЗ на серию. Раньше условие смотрело в хвост истории:
+    // три минуса оставались последними ИИ-сделками навсегда (новые входы заблокированы —
+    // сбросить серию нечем), и каждые 30 минут пауза продлевала сама себя — бесконечный
+    // цикл «ИИ больше никогда не торгует» (кейс пользователя: автопилот включён, а
+    // сделки не открываются, в Событиях пауза повторяется). Теперь повторная пауза
+    // ставится только если серия СТАЛА ДЛИННЕЕ зафиксированной: после паузы автопилот
+    // снова торгует, а новый минус (уже открытая и закрытая сделка) удлиняет серию.
+    const streakNow = aiLossStreak();
+    if (streakNow < (state.aiCooldownSeen || 0)) state.aiCooldownSeen = streakNow; // серия сброшена плюсом — счётчик паузы обнулён
+    if (streakNow >= 3 && streakNow > (state.aiCooldownSeen || 0)) {
+      state.aiCooldownUntil = Date.now() + 30 * 60000;
+      state.aiCooldownSeen = streakNow;
       pushEvent({
         tone: "bear",
-        title: "ИИ взял паузу на 30 минут: 3 минуса подряд",
-        detail: "защита от серии убытков: новые входы приостановлены, открытые позиции обслуживаются (стопы, безубыток, цели)",
+        title: "ИИ взял паузу на 30 минут: " + streakNow + " минуса подряд",
+        detail: "защита от серии убытков: новые входы приостановлены, открытые позиции обслуживаются (стопы, безубыток, цели) · после паузы автопилот вернётся к работе сам",
         notify: { kind: "autopilot", data: { on: true } },
       });
       persist();
       return;
     }
+    if (Date.now() < (state.aiCooldownUntil || 0)) return;
 
     // вход: уверенность ≥ обученного порога + факторы односторонни + все гварды + лимиты позиций и сумм
     if (!aiPos && res.verdict !== "wait" && effConf >= thr && (res.agreeShare == null || res.agreeShare >= 0.55) && aiCount < effMaxPos()) {
@@ -1715,7 +1824,10 @@ const Store = (() => {
   // Баланс, история сделок и события пополняются задним числом — ничего не сбрасывается.
   const catchCtl = { busy: false, lastRun: 0, stats: null };
   const CATCH_MIN_GAP = 90 * 1000;   // меньше полутора минут — догонять нечем
-  const CATCH_MAX_BARS = 120;        // 120 × 15м = 30 часов непрерывного офлайна
+  // 1000 свечей × 15м ≈ 10.4 суток: платформа должна честно отработать и ДЛИТЕЛЬНЫЙ офлайн
+  // (ограничение самой биржи — 1000 свечей за запрос; на резервных источниках Bybit/OKX
+  // покрытие меньше — 200/300 свечей, деградация мягкая). Исполнение задним числом.
+  const CATCH_MAX_BARS = 1000;
   const CATCH_AI_EVERY = 4;          // ИИ решает на каждой 4-й свече (раз в час) — экономим CPU
 
   // консервативное внутрисвечное исполнение: если за бар цена задевала и стоп, и цель —
@@ -1732,6 +1844,10 @@ const Store = (() => {
   function catchClosePosition(pos, price, reason, ts) {
     const closed = Engine.closeTrade(pos, price, reason);
     closed.closedAt = ts; // честный архив: закрытие задним числом, по времени свечи
+    // id детерминирован (позиция + время свечи): если пропущенный период параллельно
+    // догоняют страж и браузер — слияние архивов дедуплицирует закрытие по id,
+    // дубля в истории и двойного зачисления не будет
+    closed.id = `${pos.id}-c${ts}`;
     state.userPositions = state.userPositions.filter((p) => p.id !== pos.id);
     state.userClosed = [closed, ...state.userClosed].slice(0, 400);
     state.balance += closed.size + closed.pnl;
@@ -1757,8 +1873,13 @@ const Store = (() => {
     const jobs = WATCH_SYMS.map((sym) => {
       const inst = BY_SYM[sym];
       if (!inst) return Promise.resolve();
-      return Binance.fetchKlines(inst.pair, "15m", CATCH_MAX_BARS)
-        .then((rows) => {
+      const load = () => Binance.fetchKlines(inst.pair, "15m", CATCH_MAX_BARS);
+      // одна мягкая повторная попытка: одиночный сетевой сбой (Failed to fetch —
+      // биржа на секунду не ответила) не должен попадать в ленту самодиагностики;
+      // только если не ответили ДВА раза подряд — сбой честно фиксируется
+      return load()
+        .catch(() => new Promise((r) => setTimeout(r, 700)).then(load))
+        .then(async (rows) => {
           const bars = klineToBars(rows);
           if (!bars || bars.length < 10) return;
           // свечи сразу в состояние: сканер и графики работают с первой секунды,
@@ -1768,7 +1889,7 @@ const Store = (() => {
           if (!cur || !cur.length || bars[bars.length - 1].t >= cur[cur.length - 1].t) state.bars[key] = bars;
           const gapBars = bars.filter((b) => b.t * 60000 + 15 * 60000 > since - 15 * 60000);
           if (!gapBars.length) return;
-          walkGapBars(sym, bars, gapBars);
+          await walkGapBars(sym, bars, gapBars);
         })
         .catch((e) => { diagError("догоняющий движок · " + sym, e); /* символ догнать не вышло — повторит при следующем возврате, сбой виден в ленте */ });
     });
@@ -1791,8 +1912,9 @@ const Store = (() => {
       .finally(() => { catchCtl.busy = false; catchCtl.stats = null; });
   }
 
-  // прогон одной монеты через свечи пропущенного периода
-  function walkGapBars(sym, fullBars, gapBars) {
+  // прогон одной монеты через свечи пропущенного периода (async: раз в 40 свечей
+  // отдаём управление браузеру — длинный догон не подвешивает интерфейс)
+  async function walkGapBars(sym, fullBars, gapBars) {
     const st = catchCtl.stats || (catchCtl.stats = { closed: 0, opened: 0, sum: 0 });
     for (let gi = 0; gi < gapBars.length; gi++) {
       const bar = gapBars[gi];
@@ -1811,11 +1933,12 @@ const Store = (() => {
         if (newStop != null) pos.stop = newStop;
       }
 
-      // 3) выходы (стоп/цель — внутрисвечно, консервативно; BB-сигнал — по закрытию)
+      // 3) выходы (стоп/цель — внутрисвечно, консервативно; тренд-сигнал — по закрытию,
+      //    у новой политики он работает для лонга и шорта и только при плюсе)
       for (const pos of [...state.userPositions]) {
         if (pos.sym !== sym) continue;
         const hit = catchExitOnBar(pos, bar);
-        const sig = !hit && barsUpTo.length >= 22 && pos.side === "лонг" ? Engine.evalExit(pos, barsUpTo, bar.c) : null;
+        const sig = !hit && barsUpTo.length >= 22 ? Engine.evalExit(pos, barsUpTo, bar.c) : null;
         const ex = hit || (sig && sig.reason !== "Цель" && sig.reason !== "Стоп" ? sig : null);
         if (ex) {
           const closed = catchClosePosition(pos, ex.price, ex.reason, ts);
@@ -1847,9 +1970,16 @@ const Store = (() => {
         if (openedAfter > openedBefore) {
           st.opened += openedAfter - openedBefore;
           const np = state.userPositions[0];
-          if (np && np.openedAt) np.openedAt = ts; // вход задним числом — честный архив
+          if (np && np.openedAt) {
+            np.openedAt = ts; // вход задним числом — честный архив
+            // детерминированный id (время свечи + монета): если тот же период параллельно
+            // догоняет страж — слияние не создаст фантомный дубль позиции
+            np.id = `u${ts}-${sym}`;
+          }
         }
       }
+      // кооперативная пауза: длинный догон не блокирует поток интерфейса
+      if (gi % 40 === 39) await new Promise((r) => setTimeout(r, 0));
     }
   }
 
@@ -2021,9 +2151,12 @@ const Store = (() => {
     // жизнь без пользователя + синхронизация устройств
     catchUp, catchInfo: () => ({ lastCatchUp: state.lastCatchUp, lastRun: catchCtl.lastRun, busy: catchCtl.busy }),
     enableSync, syncPush, syncPull, syncInfo, exportBackup, importBackup, archiveAccount,
+    clearClosedHistory,
     effAuto,
     // внутренности для юнит-тестов
     _flipAllowed: flipAllowed, _riskGuard: riskGuard, _heatGuard: heatGuard, _aiLossStreak: aiLossStreak,
+    _aiAutoStep: aiAutoStep, _diagInfo: () => ({ count: diagCount, foreign: foreignCount }),
+    _diagReset: () => { lastDiagAt = 0; diagSeen.clear(); diagCount = 0; foreignCount = 0; }, // только для юнит-тестов
     _mergeArchives: mergeArchives, _applyArchive: applyArchive, _fpOf: fpOf, _diagError: diagError,
     _trimForCloud: trimForCloud, _isVirginArchive: isVirginArchive,
     _persist: persist,

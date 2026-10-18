@@ -882,6 +882,17 @@ input[type="range"] { width: 64px; accent-color: var(--accent); }
 .sync-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
 .sync-actions .btn-lime, .sync-actions .btn-ghost { width: auto; }
 
+/* пошаговая инструкция «Стража» в Кабинете (details/summary) */
+.cab-details { margin-top: 10px; border: 1px solid var(--border); border-radius: 12px; background: rgba(255,255,255,.02); overflow: hidden; }
+.cab-details summary { cursor: pointer; padding: 10px 14px; font-size: 12.5px; font-weight: 600; color: #e4e4e7; list-style: none; user-select: none; }
+.cab-details summary::-webkit-details-marker { display: none; }
+.cab-details summary::before { content: "▸ "; color: var(--gold); }
+.cab-details[open] summary::before { content: "▾ "; }
+.cab-details[open] summary { border-bottom: 1px solid var(--border); }
+.cab-steps { margin: 0; padding: 12px 14px 12px 32px; font-size: 12px; line-height: 1.65; color: #b6aec4; display: grid; gap: 8px; }
+.cab-steps b { color: #e4e4e7; }
+.cab-steps .num { color: var(--gold); font-size: 11.5px; }
+
 /* ============================================================
    МОБИЛЬНЫЙ ИНТЕРФЕЙС — полный редизайн (удобство одной рукой)
    ============================================================ */
