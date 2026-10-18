@@ -82,17 +82,28 @@ const Engine = (() => {
     };
   }
 
-  // выход по живой цене: цель/стоп/сигнал (закрытие ниже средней BB)
+  // выход по живой цене: цель/стоп/сигнал (двойное закрытие за серединой BB)
+  // ПОЛИТИКА ВЫХОДОВ ИИ (требование пользователя): ИИ закрывает сделку либо когда та
+  // ОЧЕВИДНО провальная (супер-убыток за стопом), либо когда фиксирует профит (цель/
+  // трейлинг/тренд-выход в плюсе). Малый минус и шум — НЕ повод закрывать: позиция
+  // дожидается цели или стопа.
   function evalExit(pos, bars, price) {
     const dir = pos.side === "лонг" ? 1 : -1;
     if (dir * (price - pos.entry) >= dir * (pos.target - pos.entry)) return { reason: "Цель", price: pos.target };
-    if (dir * (price - pos.entry) <= dir * (pos.stop - pos.entry)) return { reason: "Стоп", price: pos.stop };
-    if (bars && bars.length >= 22 && pos.side === "лонг") {
+    // стоп с ГИСТЕРЕЗИСОМ для ИИ-позиций: срабатывает только на 0.06% ГЛУБЖЕ стопа —
+    // случайный фитиль/шум не выносит сделку раньше времени; сам минус при этом
+    // остаётся осмысленным (у ИИ стоп ≥ 0.5% от входа — уровень «супер-убытка»)
+    const slack = pos.strategy === "ai" ? pos.entry * 0.0006 : 0;
+    if (dir * (price - pos.entry) <= dir * (pos.stop - pos.entry) - slack) return { reason: "Стоп", price: pos.stop };
+    // тренд-выход — СИММЕТРИЧНО для лонга и шорта (раньше был только лонг), но ТОЛЬКО
+    // когда сделка в плюсе, покрывающем комиссию с запасом: растущий тренд сломался —
+    // фиксируем профит; в малом минусе ИИ сделку не закрывает (ждёт цели или стопа)
+    if (bars && bars.length >= 22 && dir * (price - pos.entry) > pos.entry * FEE_RATE * 1.2) {
       const closes = bars.map((b) => b.c);
       const bb = Ind.bollinger(closes, 20, 2);
       const m1 = bb.mid[bb.mid.length - 1];
       const m2 = bb.mid[bb.mid.length - 2];
-      if (m1 != null && m2 != null && closes[closes.length - 1] < m1 && closes[closes.length - 2] < m2) {
+      if (m1 != null && m2 != null && dir * (closes[closes.length - 1] - m1) < 0 && dir * (closes[closes.length - 2] - m2) < 0) {
         return { reason: "Сигнал выхода", price };
       }
     }
@@ -399,7 +410,10 @@ const Engine = (() => {
     }
 
     const side = score > 0 ? "лонг" : "шорт";
-    const risk = Math.max(a.atr * 1.2, price * 0.004);
+    // стоп ≥ 0.5% от входа (УРОВЕНЬ «СУПЕР-УБЫТКА»): сделка закрывается в минус только
+    // когда ход против неё очевидно провальный — много больше шума и комиссии 0.1%.
+    // Цель 2R ≥ 1%: профит всегда существенно покрывает круговую комиссию.
+    const risk = Math.max(a.atr * 1.2, price * 0.005);
     const stop = side === "лонг" ? price - risk : price + risk;
     const target = side === "лонг" ? price + risk * 2 : price - risk * 2;
     // уверенность: сила счёта + бонус за односторонность факторов − штраф за разноголосицу
@@ -414,10 +428,13 @@ const Engine = (() => {
   }
 
   // ---- трейлинг-защита ИИ-позиции: стоп двигается ТОЛЬКО в пользу сделки ----
-  // +1R  → стоп в безубыток (вход + 0.1R в плюс: покрываем комиссию)
-  // +1.5R → стоп фиксирует +0.5R
+  // +1R  → стоп в безубыток (вход + максимум из 0.1R и 0.25% — ПОКРЫВАЕТ комиссию 0.1% с запасом)
+  // +1.5R → стоп фиксирует минимум +0.5R (и тоже не ниже комиссионной планки)
   // +2R  → трейлинг на расстоянии 1R от текущей цены
   // Убыток трейлинг не ускоряет: раньше стопа позицию не закрывает (требование 12).
+  // ИСТОРИЧЕСКИЙ БАГ (кейс JUP): безубыток был «вход + 0.1R» — при крошечном R (0.47%)
+  // это всего +0.047% хода, круговая комиссия 0.1% делала «безубыток» ГАРАНТИРОВАННЫМ
+  // минусом (−0.27 ХРЮ). Теперь комиссионная планка учитывается явно.
   function aiTrailStop(pos, price) {
     if (!pos || !pos.ai || pos.strategy !== "ai") return null;
     // r0 фиксируем при первом трейлинге: после сдвига стопа |entry−stop| уже не исходный риск
@@ -427,10 +444,11 @@ const Engine = (() => {
     const dir = pos.side === "лонг" ? 1 : -1;
     const gainR = (dir * (price - pos.entry)) / r0;
     if (gainR < 1) return null;
+    const feeGap = ((pos.entry || price) * FEE_RATE * 2.5) / (pos.lev || 1); // ≈0.25% хода — комиссия 0.1% с запасом ×2.5
     let want;
-    if (gainR >= 2) want = price - dir * r0;          // трейлинг 1R
-    else if (gainR >= 1.5) want = pos.entry + dir * r0 * 0.5; // фикс +0.5R
-    else want = pos.entry + dir * r0 * 0.1;           // безубыток+комиссия
+    if (gainR >= 2) want = price - dir * r0;                              // трейлинг 1R
+    else if (gainR >= 1.5) want = pos.entry + dir * Math.max(r0 * 0.5, feeGap); // фикс +0.5R (не ниже комиссии)
+    else want = pos.entry + dir * Math.max(r0 * 0.1, feeGap);             // безубыток, реально покрывающий комиссию
     const better = dir === 1 ? want > pos.stop : want < pos.stop;
     return better ? want : null;
   }

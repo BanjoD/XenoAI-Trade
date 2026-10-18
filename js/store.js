@@ -32,6 +32,7 @@ const Store = (() => {
     userPositions: [],
     userClosed: [],
     equityHist: [],
+    updatedAt: 0,       // время последнего изменения аккаунта (настенные часы для слияния синка)
     started: false,
     activeSym: "BTC",
     mode: "demo",       // demo | live (реальный рынок)
@@ -51,7 +52,7 @@ const Store = (() => {
     lastCatchUp: 0,     // когда платформа последний раз «догоняла» рынок после офлайна
     lastScanAt: 0,      // хартбит ИИ-сканера: время последнего прогона движка по монете
     rev: 0,             // ревизия состояния: растёт с каждой записью (для слияния синка устройств)
-    sync: { code: null, enabled: false, lastPush: 0, lastPull: 0, lastError: null, lastSeenRev: 0 }, // синхронизация устройств
+    sync: { code: null, enabled: false, lastPush: 0, lastPull: 0, lastError: null, lastSeenRev: 0, sawRemote: false }, // синхронизация устройств
   };
 
   // ------- память ИИ (обучение на результатах сделок) -------
@@ -79,7 +80,6 @@ const Store = (() => {
   const GLOBAL_BRAIN_KEY = "xenoai_global_brain_v1";
   const BRAIN_CLOUD_KEY = "xenoai-global-brain-a7x42";
   const BRAIN_READ_URL = "https://textdb.online/" + BRAIN_CLOUD_KEY;
-  const BRAIN_WRITE_URL = "https://textdb.online/update/?key=" + BRAIN_CLOUD_KEY + "&value=";
 
   function normalizeBrain(b) {
     const base = defaultBrain();
@@ -131,11 +131,29 @@ const Store = (() => {
 
   // --- облачная синхронизация памяти (textdb.online: бесплатно, анонимно, CORS ок) ---
   const brainSync = { busy: false, pending: false, lastOkAt: 0, lastPushAt: 0, mode: "подключение…" };
-  function fetchT(url, ms) {
+  function fetchT(url, ms, opts) {
     const ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
     const t = ctl ? setTimeout(() => ctl.abort(), ms || 7000) : null;
-    const p = fetch(url, ctl ? { signal: ctl.signal } : {});
+    const p = fetch(url, ctl ? Object.assign({}, opts || {}, { signal: ctl.signal }) : (opts || {}));
     return p.then((r) => { if (t) clearTimeout(t); return r; }, (e) => { if (t) clearTimeout(t); throw e; });
+  }
+  // дневной бюджет записей в облако: textdb.online ограничивает 500 записей/сутки с одного
+  // IP (чтения не ограничены). Мозг ИИ и архив аккаунта делят общий счётчик; при исчерпании
+  // запись откладывается до завтра, локальная работа и чтения продолжаются как обычно.
+  let budgetCache = null;
+  function budgetTake() {
+    const day = new Date().toISOString().slice(0, 10);
+    if (!budgetCache || budgetCache.day !== day) {
+      budgetCache = { day, n: 0 };
+      try {
+        const raw = JSON.parse(localStorage.getItem(dataKey() + "__budget") || "null");
+        if (raw && raw.day === day && Number.isFinite(raw.n)) budgetCache.n = raw.n;
+      } catch (e) { /* noop */ }
+    }
+    if (budgetCache.n >= 400) return false;
+    budgetCache.n++;
+    try { localStorage.setItem(dataKey() + "__budget", JSON.stringify(budgetCache)); } catch (e) { /* noop */ }
+    return true;
   }
   function saveGlobalBrainLocal() {
     try { localStorage.setItem(GLOBAL_BRAIN_KEY, JSON.stringify(state.aiBrain)); } catch (e) { /* noop */ }
@@ -143,11 +161,13 @@ const Store = (() => {
   function brainPush() {
     if (!state.started) return; // не пушим до старта платформы (и из тестов)
     if (brainSync.busy) { brainSync.pending = true; return; }
+    if (!budgetTake()) return; // дневной лимит облака: мозг уже на устройстве, уедет при следующем окне
     brainSync.busy = true;
-    const body = encodeURIComponent(JSON.stringify(state.aiBrain));
-    fetchT(BRAIN_WRITE_URL + body, 9000)
+    // POST вместо GET: мозг с большим symStats не влезает в URL, а POST /update держит 200 000 символов
+    const body = "key=" + encodeURIComponent(BRAIN_CLOUD_KEY) + "&value=" + encodeURIComponent(JSON.stringify(state.aiBrain));
+    fetchT(SYNC_UPDATE_URL, 9000, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body })
       .then((r) => { if (!r.ok) throw new Error("push " + r.status); return r.json().catch(() => ({})); })
-      .then(() => { brainSync.lastOkAt = Date.now(); brainSync.lastPushAt = Date.now(); brainSync.mode = "облако"; })
+      .then((j) => { if (j && j.status === 0) throw new Error("облако отклонило запись"); brainSync.lastOkAt = Date.now(); brainSync.lastPushAt = Date.now(); brainSync.mode = "облако"; })
       .catch(() => { brainSync.mode = brainSync.lastOkAt ? "облако" : "локально (нет сети)"; })
       .then(() => { brainSync.busy = false; if (brainSync.pending) { brainSync.pending = false; setTimeout(brainPush, 2000); } });
   }
@@ -277,7 +297,7 @@ const Store = (() => {
   function archiveAccount() {
     const s = state;
     return {
-      v: 3, rev: s.rev || 0, updatedAt: Date.now(),
+      v: 3, rev: s.rev || 0, updatedAt: s.updatedAt || Date.now(),
       balance: s.balance, startBalance: s.startBalance,
       userPositions: s.userPositions, userClosed: s.userClosed.slice(0, 400),
       labAccounts: s.labAccounts, labPositions: s.labPositions, labClosed: s.labClosed.slice(0, 400),
@@ -308,6 +328,7 @@ const Store = (() => {
     persistTimer = setTimeout(() => {
       persistTimer = null;
       state.rev = (state.rev || 0) + 1; // каждая запись — новая ревизия (слияние синка)
+      state.updatedAt = Date.now();     // настенные часы изменения — их сравнивают устройства
       const data = archiveAccount();
       data.rev = state.rev;
       writeRawSafe(dataKey(), JSON.stringify(data));
@@ -345,6 +366,9 @@ const Store = (() => {
         .slice(0, 8);
     }
     if (typeof d.rev === "number" && d.rev > (state.rev || 0)) state.rev = d.rev;
+    // время последнего изменения берём из архива (настенные часы для слияния устройств):
+    // устройство, не заходившее 3 дня, должно остаться «старым», а не казаться свежим
+    if (typeof d.updatedAt === "number" && d.updatedAt > (state.updatedAt || 0)) state.updatedAt = d.updatedAt;
     // в реальном режиме после перезагрузки страницы соединение надо перепроверить
     if (state.mode === "live" && !(window.Live && Live.isConnected())) state.mode = "demo";
   }
@@ -400,10 +424,15 @@ const Store = (() => {
     state.aiMaxPos = 5;
     state.aiPosMode = "auto"; state.maxDeal = 1000; state.maxTotal = 5000;
     state.aiAutoLive = false; // в реальном режиме автопилот всегда стартует выключенным
-    state.lastCatchUp = 0; state.rev = 0;
-    state.sync = { code: null, enabled: false, lastPush: 0, lastPull: 0, lastError: null, lastSeenRev: 0 };
+    state.lastCatchUp = 0; state.rev = 0; state.updatedAt = 0;
+    state.sync = { code: null, enabled: false, lastPush: 0, lastPull: 0, lastError: null, lastSeenRev: 0, sawRemote: false };
+    // sync-рантайм перезапускается для нового пользователя: метаданные читаются заново,
+    // авто-включение синка срабатывает для его аккаунта (initSyncRuntime — одноразовый)
+    if (typeof syncCtl !== "undefined" && syncCtl.pollTimer) { try { clearInterval(syncCtl.pollTimer); } catch (e) { /* noop */ } syncCtl.pollTimer = null; }
+    if (typeof syncCtl !== "undefined") { syncCtl.inited = false; syncCtl.busy = false; syncCtl.pending = false; }
     state.started = started; state.activeSym = "BTC";
     hydrate();
+    initSyncRuntime(); // после смены пользователя — метаданные и авто-включение синка его аккаунта
   }
 
   // сделки может открывать/закрывать только аккаунт David или Yura
@@ -422,7 +451,14 @@ const Store = (() => {
   // если устройства торговали параллельно в офлайне), а «опережающая» ревизия
   // определяет баланс и открытые позиции.
   const SYNC_BASE = "https://textdb.online/";
-  const syncCtl = { busy: false, pending: false, pushTimer: null, pollTimer: null, inited: false };
+  // ЗАПИСЬ — только POST на /update (без слэша): value до 200 000 символов в теле запроса.
+  // Предыдущий вариант писал GET-запросом (?key=..&value=..) и МОЛЧА умирал на ~16 КБ:
+  // архив аккаунта с историей (сотни КБ) не помещался в URL, сервер отвечал HTTP 414,
+  // пуш не доезжал — и второе устройство вечно видело пустоту (кейс: телефон 7 сделок,
+  // ПК 0). Чтение — как раньше: GET https://textdb.online/{key}, всегда HTTP 200,
+  // CORS открыты на обе операции.
+  const SYNC_UPDATE_URL = "https://textdb.online/update";
+  const syncCtl = { busy: false, pending: false, pushTimer: null, pollTimer: null, inited: false, lastPushedFp: null };
 
   function syncKey() { return "xenoai-sync-" + (state.sync && state.sync.code ? String(state.sync.code).trim() : ""); }
   function genSyncCode() {
@@ -447,18 +483,23 @@ const Store = (() => {
         const d = JSON.parse(raw);
         if (d && typeof d === "object") state.sync = Object.assign(state.sync, {
           code: typeof d.code === "string" ? d.code : null,
-          enabled: !!d.enabled, lastPush: d.lastPush || 0, lastPull: d.lastPull || 0, lastSeenRev: d.lastSeenRev || 0,
+          enabled: true, // синхронизация ВСЕГДА включена: единый аккаунт = единые данные, без опций вкл/выкл
+          lastPush: d.lastPush || 0, lastPull: d.lastPull || 0, lastSeenRev: d.lastSeenRev || 0,
+          sawRemote: !!d.sawRemote,
         });
       }
     } catch (e) { /* noop */ }
   }
 
   // слияние двух архивов: закрытые сделки и события — объединение (union по id),
-  // скаляры и открытые позиции — от архива со старшей ревизией
+  // скаляры и открытые позиции — от архива, который менялся ПОСЛЕДНИМ по настенным
+  // часам (updatedAt). Нельзя сравнивать rev: это ЛОКАЛЬНЫЙ счётчик записей — у давно
+  // используемого ПК он в тысячи раз больше, чем у свежего телефона, и «старый» ПК
+  // перетирал бы актуальные позиции телефона (классический рассинхрон устройств)
   function mergeArchives(a, b) {
     if (!a || typeof a !== "object") return b;
     if (!b || typeof b !== "object") return a;
-    const main = (b.rev || 0) >= (a.rev || 0) ? b : a;
+    const main = ((b.updatedAt || 0) > (a.updatedAt || 0)) ? b : a;
     const other = main === b ? a : b;
     const out = JSON.parse(JSON.stringify(main));
     const seenC = new Set((out.userClosed || []).map((c) => c.id));
@@ -478,6 +519,7 @@ const Store = (() => {
   function applySyncArchive(d, sourceLabel) {
     const before = { bal: state.balance, closed: state.userClosed.length, open: state.userPositions.length };
     applyArchive(d);
+    state.updatedAt = Date.now(); // содержимое аккаунта только что изменилось — фиксируем сразу, не дожидаясь debounce persist
     const after = { bal: state.balance, closed: state.userClosed.length, open: state.userPositions.length };
     pushEvent({
       tone: "neutral",
@@ -488,20 +530,76 @@ const Store = (() => {
     emit();
   }
 
-  function syncPush() {
-    if (!state.started || !state.sync.enabled || !state.sync.code) return;
-    if (syncCtl.busy) { syncCtl.pending = true; return; }
+  // облако textdb хранит value до 200 000 символов; полный локальный архив (до 300 сделок
+  // со снапшотами факторов, ~850 байт на сделку) может превышать лимит. Режем ХВОСТ
+  // истории, не трогая баланс, открытые позиции, настройки и свежие сделки: в облаке
+  // всегда живут последние ≥150 сделок, полная история — локально и в файловом бэкапе.
+  function trimForCloud(src) {
+    const d = JSON.parse(JSON.stringify(src));
+    const steps = [
+      { uc: 150, lc: 150, ev: 60, eq: 300 },
+      { uc: 80, lc: 80, ev: 40, eq: 150 },
+      { uc: 40, lc: 40, ev: 24, eq: 80 },
+      { uc: 20, lc: 20, ev: 12, eq: 40 },
+    ];
+    for (const st of steps) {
+      d.userClosed = (d.userClosed || []).slice(0, st.uc);
+      d.labClosed = (d.labClosed || []).slice(0, st.lc);
+      d.events = (d.events || []).slice(0, st.ev);
+      d.equityHist = (d.equityHist || []).slice(-st.eq);
+      if (JSON.stringify(d).length <= 190000) return d;
+    }
+    return d;
+  }
+
+  // «девственный» аккаунт: торгов ещё не было, менять в облаке нечего. Такой архив
+  // НЕ имеет права затирать облако — классическая потеря данных: свежий ПК с пустым
+  // счётом перезаписывал телефон с 7 открытыми позициями.
+  function isVirginArchive(d) {
+    return (!d.userPositions || !d.userPositions.length)
+      && (!d.userClosed || !d.userClosed.length)
+      && (!d.labPositions || !d.labPositions.length)
+      && (!d.labClosed || !d.labClosed.length)
+      && (!d.equityHist || !d.equityHist.length)
+      && d.balance === d.startBalance;
+  }
+
+  function syncPush(force) {
+    if (!state.started || !state.sync.enabled || !state.sync.code) return Promise.resolve(false);
+    if (syncCtl.busy) { syncCtl.pending = true; return Promise.resolve(false); }
+    // троттлинг записи (лимит облака — 500 записей/сутки с IP): не чаще раза в 50 секунд;
+    // force=true — для пулов-«посева» и повторов очереди, он всё равно проходит через бюджет
+    const since = Date.now() - (state.sync.lastPush || 0);
+    if (!force && since < 50000) {
+      if (!syncCtl.pushTimer) syncCtl.pushTimer = setTimeout(() => { syncCtl.pushTimer = null; syncPush(true); }, Math.max(2000, 50000 - since));
+      return Promise.resolve(false);
+    }
+    const local = archiveAccount();
+    // пустой счёт не затирает облако, где уже есть данные другого устройства
+    if (state.sync.sawRemote && isVirginArchive(local)) return Promise.resolve(false);
+    const fp = fpOf(local);
+    if (force !== "seed" && fp === syncCtl.lastPushedFp) return Promise.resolve(false); // содержимое не менялось — запись не тратим
+    if (!budgetTake()) { state.sync.lastError = "дневной лимит записей облака исчерпан — данные уедут при следующем окне"; return Promise.resolve(false); }
     syncCtl.busy = true;
-    const payload = archiveAccount();
-    const body = encodeURIComponent(JSON.stringify(payload));
-    fetchT(SYNC_BASE + "update/?key=" + encodeURIComponent(syncKey()) + "&value=" + body, 12000)
-      .then((r) => { if (!r.ok) throw new Error("push " + r.status); state.sync.lastPush = Date.now(); state.sync.lastError = null; })
-      .catch((e) => { state.sync.lastError = "пуш: " + String(e && e.message || e); })
-      .then(() => { syncCtl.busy = false; persistSyncMeta(); if (syncCtl.pending) { syncCtl.pending = false; setTimeout(syncPush, 3000); } emit(); });
+    const body = "key=" + encodeURIComponent(syncKey()) + "&value=" + encodeURIComponent(JSON.stringify(trimForCloud(local)));
+    return fetchT(SYNC_UPDATE_URL, 20000, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body })
+      .then((r) => { if (!r.ok) throw new Error("пуш " + r.status); return r.json().catch(() => ({})); })
+      .then((j) => {
+        if (j && j.status === 0) throw new Error("облако отклонило запись");
+        state.sync.lastPush = Date.now(); state.sync.lastError = null;
+        syncCtl.lastPushedFp = fp;
+        return true;
+      })
+      .catch((e) => { state.sync.lastError = "пуш: " + String(e && e.message || e); return false; })
+      .then((ok) => {
+        syncCtl.busy = false; persistSyncMeta();
+        if (syncCtl.pending) { syncCtl.pending = false; setTimeout(() => syncPush(true), 3000); }
+        emit(); return ok;
+      });
   }
   function scheduleSyncPush() {
-    if (!state.sync.enabled || syncCtl.pushTimer) return;
-    syncCtl.pushTimer = setTimeout(() => { syncCtl.pushTimer = null; syncPush(); }, 5000);
+    if (!state.sync.enabled || !state.sync.code || syncCtl.pushTimer) return;
+    syncCtl.pushTimer = setTimeout(() => { syncCtl.pushTimer = null; syncPush(false); }, 8000);
   }
   // «отпечаток» архива: состав баланса/позиций/истории/настроек без ревизий.
   // Нужен, чтобы синхронизация не зацикливалась: если содержимое после слияния
@@ -524,30 +622,50 @@ const Store = (() => {
     if (!state.sync.enabled || !state.sync.code) return Promise.resolve(false);
     if (syncCtl.busy) return Promise.resolve(false);
     syncCtl.busy = true;
-    return fetchT(SYNC_BASE + syncKey(), 10000)
+    return fetchT(SYNC_BASE + syncKey(), 12000)
       .then((r) => { if (!r.ok) throw new Error("pull " + r.status); return r.text(); })
       .then((txt) => {
         txt = (txt || "").trim();
-        if (!txt) throw new Error("облако пустое — сначала пуш с устройства-источника");
+        if (!txt) {
+          // облако пустое (новый код): сеем его своим архивом, если есть чем —
+          // иначе (девственный счёт) запись не тратим
+          const local0 = archiveAccount();
+          if (!isVirginArchive(local0)) return syncPush("seed");
+          return false;
+        }
         const remote = JSON.parse(txt);
         if (!remote || typeof remote !== "object" || !Array.isArray(remote.userClosed)) throw new Error("чужой или битый архив");
         state.sync.lastPull = Date.now();
         state.sync.lastError = null;
-        if ((remote.rev || 0) === (state.rev || 0)) return false;
-        if ((state.rev || 0) > (remote.rev || 0)) { syncPush(); return false; }
-        // облако опережает: сливаем (история объединяется) и применяем один раз
-        const merged = mergeArchives(archiveAccount(), remote);
-        if (fpOf(merged) === fpOf(remote)) {
-          // содержимое уже совпадает с облачным — принимаем ревизию без лишнего цикла пуша
+        state.sync.sawRemote = true; // облако живо и с данными: пустой локальный счёт отныне не может его затереть
+        const local = archiveAccount();
+        // ВАЖНО: archiveAccount() у девственного аккаунта (updatedAt=0) подставляет свежий
+        // Date.now() — и свежий ПК считал бы себя «новее» архива телефона в облаке,
+        // отказываясь от слияния (точный кейс пользователя: телефон 7 сделок / ПК 0).
+        // Для сравнения и слияния используем НАСТОЯЩИЕ настенные часы состояния.
+        local.updatedAt = state.updatedAt || 0;
+        // содержимое совпало — ограничиваемся принятием старшей ревизии, без цикла пушей
+        if (fpOf(remote) === fpOf(local)) {
+          state.rev = Math.max(state.rev || 0, remote.rev || 0);
+          syncCtl.lastPushedFp = fpOf(local);
+          return false;
+        }
+        // локальные изменения свежее облака — делимся собой (второе устройство подтянет при своём пуле)
+        if ((local.updatedAt || 0) >= (remote.updatedAt || 0)) { syncPush(false); return false; }
+        // облако свежее: сливаем (история объединяется) и применяем один раз
+        const merged = mergeArchives(local, remote);
+        if (fpOf(merged) === fpOf(local)) {
+          // слияние не изменило локальное содержимое — принимаем ревизию без лишнего цикла пуша
           state.rev = Math.max(state.rev || 0, remote.rev || 0);
           return false;
         }
         applySyncArchive(merged, "облако");
+        syncCtl.lastPushedFp = null; // содержимое изменилось — следующий пуш обязан уйти
         return true;
       })
       .catch((e) => {
         const msg = String(e && e.message || e);
-        if (msg.indexOf("облако пустое") === -1) state.sync.lastError = msg; // пустое облако — норма для нового кода
+        if (msg.indexOf("пустое") === -1) state.sync.lastError = msg; // пустое облако — норма для нового кода
         return false;
       })
       .then((changed) => { syncCtl.busy = false; persistSyncMeta(); emit(); return changed; });
@@ -556,27 +674,21 @@ const Store = (() => {
   function enableSync(code) {
     const c = String(code || "").trim().toUpperCase();
     if (c && !/^[A-Z0-9-]{8,24}$/.test(c)) return { ok: false, error: "Код синхронизации — 8–24 латинских букв, цифр и дефисов" };
-    state.sync.code = c || genSyncCode();
+    // без явного кода берём детерминированный код аккаунта — тогда все устройства
+    // с этим логином объединяются сами, а не разъезжаются по разным облакам
+    state.sync.code = c || (typeof Auth !== "undefined" && Auth.syncCodeFor ? Auth.syncCodeFor(Auth.sessionLogin()) : genSyncCode());
     state.sync.enabled = true;
     state.sync.lastError = null;
     persistSyncMeta();
-    pushEvent({ tone: "neutral", title: "Синхронизация устройств включена", detail: `код ${state.sync.code} · полный архив аккаунта (баланс, позиции, вся история сделок) уходит в облако и подтягивается на других устройствах` });
     // порядок важен: СНАЧАЛА тянем облачный архив (если код уже используется другим
     // устройством — подтянем его историю, а не затрём её своим пустым состоянием),
     // потом делимся своим
-    syncPull().then(() => { if (state.sync.enabled) syncPush(); });
+    syncPull().then(() => { if (state.sync.enabled) syncPush(true); });
     if (typeof setInterval === "function" && !syncCtl.pollTimer) {
       syncCtl.pollTimer = setInterval(() => { if (state.started && state.sync.enabled) syncPull(); }, 120000);
     }
     persist(); emit();
     return { ok: true, code: state.sync.code };
-  }
-  function disableSync() {
-    state.sync.enabled = false;
-    persistSyncMeta();
-    pushEvent({ tone: "neutral", title: "Синхронизация устройств выключена", detail: "архив аккаунта остался в браузере; история в облаке не удалена" });
-    persist(); emit();
-    return { ok: true };
   }
   function syncInfo() {
     return { code: state.sync.code, enabled: state.sync.enabled, lastPush: state.sync.lastPush, lastPull: state.sync.lastPull, lastError: state.sync.lastError, busy: syncCtl.busy };
@@ -585,11 +697,50 @@ const Store = (() => {
     if (syncCtl.inited) return;
     syncCtl.inited = true;
     loadSyncMeta();
+    // ЕДИНЫЙ АККАУНТ = ЕДИНЫЕ ДАННЫЕ: синхронизация включена ВСЕГДА, без опций вкл/выкл
+    // (требование пользователя). Код выводится детерминированно из логина (Auth.syncCodeFor),
+    // поэтому один и тот же аккаунт на любом устройстве попадает в одно и то же облако сам:
+    // баланс, открытые позиции и вся история объединяются без ручных действий. Старый код из
+    // метаданных (эпохи ручных кодов) заменяется кодом аккаунта — иначе устройство смотрело
+    // бы в чужое/одинокое облако и «не видило» данные основного устройства.
+    const autoCode = (typeof Auth !== "undefined" && Auth.syncCodeFor) ? Auth.syncCodeFor(Auth.sessionLogin()) : null;
+    const prevCode = state.sync.code;
+    const wasOff = !state.sync.enabled || !state.sync.code;
+    state.sync.code = autoCode || state.sync.code || genSyncCode();
+    state.sync.enabled = true;
+    state.sync.lastError = null;
+    if (wasOff || prevCode !== state.sync.code) {
+      persistSyncMeta();
+      pushEvent({ tone: "neutral", title: "Синхронизация устройств включена", detail: `единый аккаунт — единые данные: баланс, открытые позиции и вся история синхронизируются между устройствами автоматически (код аккаунта ${state.sync.code}, виден в Кабинете; отключения не предусмотрено)` });
+    }
     if (state.sync.enabled && state.sync.code) {
       if (typeof setInterval === "function" && !syncCtl.pollTimer) {
-        syncCtl.pollTimer = setInterval(() => { if (state.started && state.sync.enabled) syncPull(); }, 120000);
+        syncCtl.pollTimer = setInterval(() => { if (state.started && state.sync.enabled) syncPull(); }, 60000);
       }
-      setTimeout(() => { if (state.started) syncPull(); }, 4000);
+      setTimeout(() => { if (state.started) syncPull(); }, 3000);
+      // мгновенный пул при возврате во вкладку / восстановлении сети:
+      // рассинхрон между устройствами живёт секунды, а не минуты
+      if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+        const kick = () => { if (state.started && state.sync.enabled && !syncCtl.busy) setTimeout(() => { if (state.sync.enabled) syncPull(); }, 1500); };
+        window.addEventListener("focus", kick);
+        window.addEventListener("online", kick);
+        document.addEventListener("visibilitychange", () => { if (!document.hidden) kick(); });
+        // финальная досылка при закрытии страницы: последнее состояние уезжает
+        // в облако через sendBeacon (не зависит от выгрузки документа)
+        window.addEventListener("pagehide", () => {
+          try {
+            const local = archiveAccount();
+            if (state.sync.sawRemote && isVirginArchive(local)) return;
+            const fp = fpOf(local);
+            if (fp === syncCtl.lastPushedFp) return;
+            const j = JSON.stringify(trimForCloud(local));
+            if (typeof navigator === "undefined" || !navigator.sendBeacon || j.length > 64000) return;
+            const body = "key=" + encodeURIComponent(syncKey()) + "&value=" + encodeURIComponent(j);
+            const okB = navigator.sendBeacon(SYNC_UPDATE_URL, new Blob([body], { type: "application/x-www-form-urlencoded" }));
+            if (okB) { syncCtl.lastPushedFp = fp; state.sync.lastPush = Date.now(); persistSyncMeta(); }
+          } catch (e) { /* noop */ }
+        });
+      }
     }
   }
 
@@ -945,13 +1096,18 @@ const Store = (() => {
     return { ok: true, why: "ок" };
   }
 
-  // риск-гвард по самому расчёту ИИ: волатильность и вспышки
+  // риск-гвард по самому расчёту ИИ: волатильность, вспышки и ОКУПАЕМОСТЬ комиссии
   function riskGuard(res) {
     if (!res) return { ok: false, why: "нет расчёта" };
     // взрывная волатильность: риск на сделку шире 6% цены — соотношение не удержать
     if (res.riskPct > 6) return { ok: false, why: `волатильность взрывная: риск ${res.riskPct.toFixed(1)}% на 15м-бар` };
-    // мёртвый рынок: ход меньше шума и комиссий — сделка не окупается
-    if (res.riskPct < 0.12) return { ok: false, why: "рынок затих: ход не покроет даже комиссию" };
+    // мёртвый рынок: ход меньше ~полпроцента не окупает круговую комиссию 0.1% и состоит
+    // из шума — ИИ входит только туда, где стоп и цель БОЛЬШЕ издержек (кейс JUP:
+    // риск 0.47%, ход +0.05% → «профитная» по направлению сделка закрылась в минус после комиссии)
+    if (res.riskPct < 0.45) return { ok: false, why: `ход слишком мал (${res.riskPct.toFixed(2)}%): круговая комиссия 0.1% съест результат` };
+    // чистое соотношение после комиссии обязано оставаться ≥ 1.5: (2R − 0.1%) / (R + 0.1%)
+    const netRR = ((res.targetPct || 0) - 0.1) / ((res.riskPct || 0) + 0.1);
+    if (!(netRR >= 1.5)) return { ok: false, why: `с учётом комиссии 0.1% соотношение цель/риск всего ${netRR.toFixed(2)} — вход не окупается` };
     // вспышка/памп-дамп: последняя свеча аномально шире ATR — ждём успокоения
     if (res.flashRatio > 3.5) return { ok: false, why: `аномальная свеча ×${res.flashRatio.toFixed(1)} к ATR — вспышка или манипуляция` };
     return { ok: true, why: "ок" };
@@ -1864,11 +2020,13 @@ const Store = (() => {
     openPositionsSum, autoMaxPos, effMaxPos, aiSizeCalc, aiKellyFrac,
     // жизнь без пользователя + синхронизация устройств
     catchUp, catchInfo: () => ({ lastCatchUp: state.lastCatchUp, lastRun: catchCtl.lastRun, busy: catchCtl.busy }),
-    enableSync, disableSync, syncPush, syncPull, syncInfo, exportBackup, importBackup, archiveAccount,
+    enableSync, syncPush, syncPull, syncInfo, exportBackup, importBackup, archiveAccount,
     effAuto,
     // внутренности для юнит-тестов
     _flipAllowed: flipAllowed, _riskGuard: riskGuard, _heatGuard: heatGuard, _aiLossStreak: aiLossStreak,
-    _mergeArchives: mergeArchives, _applyArchive: applyArchive, _diagError: diagError,
+    _mergeArchives: mergeArchives, _applyArchive: applyArchive, _fpOf: fpOf, _diagError: diagError,
+    _trimForCloud: trimForCloud, _isVirginArchive: isVirginArchive,
+    _persist: persist,
     _pairToSym: (p) => PAIR_TO_SYM[p] || null,
   };
 })();

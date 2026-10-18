@@ -946,30 +946,18 @@ const ViewsTrade = (() => {
     const totalPnl = s.userClosed.reduce((a, c) => a + c.pnl, 0);
     const sync = typeof Store.syncInfo === "function" ? Store.syncInfo() : null;
     const catchI = typeof Store.catchInfo === "function" ? Store.catchInfo() : null;
-    const syncStatus = !sync ? "" : !sync.enabled
-      ? `<div class="sync-state">Синхронизация выключена — архив аккаунта живёт только в этом браузере.</div>`
-      : `<div class="sync-state">
-          <span class="np-ok">включена</span> · код <b class="num" id="sync-code-txt">${h.esc(sync.code || "—")}</b>
-          <button class="link-btn" data-action="sync:copy">${h.icon("copy", 12)} скопировать</button>
-          <div class="num" style="margin-top:4px;font-size:11.5px;color:#8d8a94">пуш: ${sync.lastPush ? Fmt.fmtClock(sync.lastPush) : "—"} · пул: ${sync.lastPull ? Fmt.fmtClock(sync.lastPull) : "—"}${sync.lastError ? ` · <span class="text-red">${h.esc(sync.lastError)}</span>` : ""}</div>
-        </div>`;
+    const syncStatus = !sync ? "" : `<div class="sync-state">
+        <span class="np-ok">включена · всегда</span> · код аккаунта <b class="num" id="sync-code-txt">${h.esc(sync.code || "—")}</b>
+        <button class="link-btn" data-action="sync:copy">${h.icon("copy", 12)} скопировать</button>
+        <div class="num" style="margin-top:4px;font-size:11.5px;color:#8d8a94">единый аккаунт — единые данные: код выводится из логина, на новом устройстве вводить его не нужно · пуш: ${sync.lastPush ? Fmt.fmtClock(sync.lastPush) : "—"} · пул: ${sync.lastPull ? Fmt.fmtClock(sync.lastPull) : "—"}${sync.lastError ? ` · <span class="text-red">${h.esc(sync.lastError)}</span>` : ""}</div>
+      </div>`;
     const syncBlock = `
-      <div class="notify-sec">Синхронизация устройств · вся история</div>
+      <div class="notify-sec">Синхронизация устройств · всегда включена</div>
       ${syncStatus}
-      ${!sync || !sync.enabled ? `
       <div class="sync-actions">
-        <button class="btn-lime" data-action="sync:enable-new">${h.icon("radio", 13)} Включить синхронизацию</button>
-        <span class="custom-wrap" style="flex-shrink:0">
-          <input id="sync-code-inp" class="inp num" placeholder="код с другого устройства" style="width:190px">
-          <button class="limit-apply" data-action="sync:enable-code" title="Подключиться к архиву по коду">OK</button>
-        </span>
+        <button class="btn-ghost" data-action="sync:now">${h.icon("zap", 13)} Синхронизировать сейчас</button>
       </div>
-      <div class="ai-limit-note">Включите на основном устройстве — получите код; на другом устройстве войдите в тот же аккаунт и введите код. Баланс, открытые позиции и ВСЯ история сделок/событий объединяются автоматически (пуш после каждого изменения, пул каждые 2 мин). История объединяется без потерь, даже если устройства торговали по отдельности.</div>`
-      : `<div class="sync-actions">
-          <button class="btn-ghost" data-action="sync:now">${h.icon("zap", 13)} Синхронизировать сейчас</button>
-          <button class="btn-ghost" data-action="sync:disable">Выключить</button>
-        </div>
-        <div class="ai-limit-note">Пока синк включён, все изменения (сделки, ИИ-входы, баланс) уезжают в облако и подтягиваются на другие устройства с этим кодом. Без интернета платформа продолжает работать — изменения уйдут при появлении сети.</div>`}
+      <div class="ai-limit-note">Без переключателей и опций: каждое изменение (сделки, входы ИИ, баланс, вся история) сразу уходит в облако аккаунта и подтягивается на все устройства с этим же логином. Без интернета платформа продолжает работать локально — изменения уедут в облако при появлении сети (включая финальную досылку при закрытии страницы).</div>
       <div class="notify-sec">Резервная копия файлом</div>
       <div class="sync-actions">
         <button class="btn-ghost" data-action="backup:export">${h.icon("download", 13)} Скачать архив JSON</button>

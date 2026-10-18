@@ -7,6 +7,9 @@ const App = (() => {
   let moreOpen = false;
   let renderTimer = null;
   let lastRender = 0;
+  // последний момент активности скролла/тача пользователя: пока «свежо» — не перерисовываем
+  // экран целиком (иначе мобильный инерционный скролл списка токенов обрывается и возвращает назад)
+  let lastUserScroll = 0;
 
   const NAV = [
     { id: "desk", label: "Деск", icon: "grid" },
@@ -362,6 +365,13 @@ const App = (() => {
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA") && ae.getAttribute("data-role")) {
         renderTimer = setTimeout(tick, 1200);
+        return;
+      }
+      // не мешаем прокрутке (кейс мобильной версии): если пользователь скроллит список
+      // токенов/позиций, полная перерисовка убивает инерционный скролл и «возвращает
+      // обратно». Ждём паузы 800 мс; живые цифры (PnL) обновляются патчером и во время скролла
+      if (Date.now() - lastUserScroll < 800) {
+        renderTimer = setTimeout(tick, 350);
         return;
       }
       const now = Date.now();
@@ -792,41 +802,20 @@ const App = (() => {
       case "account:auto": Store.toggleAuto(); break;
 
       // ---------- синхронизация устройств + файловый бэкап ----------
-      case "sync:enable-new": {
-        const r1 = Store.enableSync("");
-        if (!r1.ok) { h.toast("error", r1.error); break; }
-        h.toast("success", "Синхронизация включена", `код ${r1.code} — введите его на других устройствах в Кабинете`);
-        h.showModal(ViewsTrade.cabinet(), {});
-        break;
-      }
-      case "sync:enable-code": {
-        const inp = document.getElementById("sync-code-inp");
-        const code = inp ? inp.value : "";
-        if (!String(code).trim()) { h.toast("error", "Введите код с другого устройства"); break; }
-        const r2 = Store.enableSync(code);
-        if (!r2.ok) { h.toast("error", r2.error); break; }
-        h.toast("success", "Подключено к облачному архиву", `код ${r2.code} · архив подтянется в течение минуты`);
-        h.showModal(ViewsTrade.cabinet(), {});
-        break;
-      }
+      // синк всегда включён (единый аккаунт = единые данные) — опций вкл/выкл нет
       case "sync:now": {
         h.toast("info", "Синхронизирую…", "пуш и пул полного архива аккаунта");
-        Store.syncPush();
+        Store.syncPush(true);
         Store.syncPull().then((changed) => {
           h.toast(changed ? "success" : "info", changed ? "Архив обновлён из облака" : "Уже актуально", changed ? "история объединена без потерь" : "локальные данные новее или совпадают");
           h.showModal(ViewsTrade.cabinet(), {});
         });
         break;
       }
-      case "sync:disable":
-        Store.disableSync();
-        h.toast("info", "Синхронизация выключена");
-        h.showModal(ViewsTrade.cabinet(), {});
-        break;
       case "sync:copy": {
         const info = Store.syncInfo();
         const txt = info.code || "";
-        const done = () => h.toast("success", "Код скопирован", txt + " — вставьте его в Кабинете на другом устройстве");
+        const done = () => h.toast("success", "Код скопирован", txt + " — он выводится из логина и одинаков на всех устройствах");
         if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done, done);
         else done();
         break;
@@ -1013,6 +1002,12 @@ const App = (() => {
     bindGlobalGuards();
     bindEvents();
     Store.subscribe(scheduleRender);
+    // защита мобильного скролла: запоминаем любую прокрутку/тач (capture — ловим и скролл
+    // внутри контейнеров). Полный ререндер откладывается, пока пользователь скроллит (см. scheduleRender)
+    const markScroll = () => { lastUserScroll = Date.now(); };
+    window.addEventListener("scroll", markScroll, { passive: true, capture: true });
+    window.addEventListener("touchstart", markScroll, { passive: true });
+    window.addEventListener("touchmove", markScroll, { passive: true });
     if (window.Live) Live.onChange(() => { scheduleRender(); });
     if (window.Binance) Binance.onSourceChange((id) => { Store.state.source = id; scheduleRender(); });
     // живой PnL: патчер на каждом тике WebSocket + страховка раз в секунду

@@ -4,7 +4,7 @@
    в симуляцию, но продолжает работать (кэш отдаёт оболочку приложения). */
 "use strict";
 
-const VERSION = "xenoai-v4";
+const VERSION = "xenoai-v6";
 const CORE = [
   "./",
   "./index.html",
