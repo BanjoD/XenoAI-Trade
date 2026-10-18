@@ -49,7 +49,8 @@ const Binance = (() => {
   }
 
   // пробует провайдеров по кругу, начиная с липкого; на каждом провайдере перебирает хосты
-  async function api(pathBuilders, timeoutMs) {
+  // opts.silent — не переключать «липкий» источник (для одиночных докачек монет)
+  async function api(pathBuilders, timeoutMs, opts) {
     let lastErr = null;
     for (let attempt = 0; attempt < PROVIDERS.length; attempt++) {
       const pIdx = (sticky + attempt) % PROVIDERS.length;
@@ -60,8 +61,7 @@ const Binance = (() => {
           const json = await fetchJson(host, path, timeoutMs);
           if (provider.id === "bybit" && json.retCode !== 0) throw new Error("bybit " + json.retCode);
           if (provider.id === "okx" && json.code !== "0") throw new Error("okx " + json.code);
-          sticky = pIdx;
-          markSource(provider.id);
+          if (!(opts && opts.silent)) { sticky = pIdx; markSource(provider.id); }
           return { data: json, provider: provider.id };
         } catch (e) {
           lastErr = e;
@@ -122,6 +122,19 @@ const Binance = (() => {
       okx: () => `/api/v5/market/tickers?instType=SPOT`,
     });
     return normTickers(data, provider, wanted);
+  }
+
+  // одиночный тикер по паре: каскад по всем провайдерам без смены «липкого» источника.
+  // нужен, когда монета недоступна на текущем источнике (у бирж разные наборы листингов:
+  // ZEC нет на Bybit, GRASS/MNT нет на Binance) — докачивает её с той биржи, где она есть.
+  async function fetchTickerOne(pair, timeoutMs) {
+    const { data, provider } = await api({
+      binance: () => `/api/v3/ticker/24hr?symbol=${pair}`,
+      bybit: () => `/v5/market/tickers?category=spot&symbol=${pair}`,
+      okx: () => `/api/v5/market/ticker?instId=${pair.replace("USDT", "-USDT")}`,
+    }, timeoutMs || 6000, { silent: true });
+    const rows = normTickers(data, provider, [pair]);
+    return rows[0] || null;
   }
 
   // ================= свечи =================
@@ -191,7 +204,7 @@ const Binance = (() => {
 
   function binanceOk() { return Date.now() - lastOk < 30000 || sourceId !== null; }
 
-  return { fetchTickers, fetchKlines, fetchAggTrades, binanceOk, sourceName, onSourceChange };
+  return { fetchTickers, fetchTickerOne, fetchKlines, fetchAggTrades, binanceOk, sourceName, onSourceChange };
 })();
 
 window.Binance = Binance;

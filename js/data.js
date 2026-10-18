@@ -3,30 +3,30 @@
 
 const DataLib = (() => {
   const WATCHLIST = [
-    { sym: "BTC", pair: "BTCUSDT", color: "#f7931a", label: "₿" },
-    { sym: "ETH", pair: "ETHUSDT", color: "#627eea", label: "Ξ" },
-    { sym: "SOL", pair: "SOLUSDT", color: "#9945ff", label: "S" },
-    { sym: "XRP", pair: "XRPUSDT", color: "#23292f", label: "X" },
-    { sym: "BNB", pair: "BNBUSDT", color: "#f0b90b", label: "B" },
-    { sym: "NEAR", pair: "NEARUSDT", color: "#00c08b", label: "N" },
-    { sym: "SUI", pair: "SUIUSDT", color: "#4da2ff", label: "S" },
-    { sym: "ARB", pair: "ARBUSDT", color: "#12aaff", label: "A" },
-    { sym: "TAO", pair: "TAOUSDT", color: "#e8e8e8", label: "τ" },
-    { sym: "LINK", pair: "LINKUSDT", color: "#2a5ada", label: "⬡" },
-    { sym: "UNI", pair: "UNIUSDT", color: "#ff66b2", label: "U" },
-    { sym: "ZEC", pair: "ZECUSDT", color: "#f4b728", label: "Z" },
-    { sym: "ONDO", pair: "ONDOUSDT", color: "#3f6fe0", label: "O" },
-    { sym: "ENA", pair: "ENAUSDT", color: "#5b6470", label: "E" },
-    { sym: "PHA", pair: "PHAUSDT", color: "#7c5cff", label: "PH" },
-    { sym: "JUP", pair: "JUPUSDT", color: "#4fae4f", label: "J" },
-    { sym: "FET", pair: "FETUSDT", color: "#1b2a4a", label: "F" },
-    { sym: "ZRO", pair: "ZROUSDT", color: "#2b2b2b", label: "Ø" },
-    { sym: "LTC", pair: "LTCUSDT", color: "#345d9d", label: "Ł" },
-    { sym: "QNT", pair: "QNTUSDT", color: "#5b8def", label: "Q" },
-    { sym: "GRASS", pair: "GRASSUSDT", color: "#8bc34a", label: "G" },
-    { sym: "EIGEN", pair: "EIGENUSDT", color: "#1b1b4d", label: "E" },
-    { sym: "KAITO", pair: "KAITOUSDT", color: "#111111", label: "K" },
-    { sym: "MNT", pair: "MNTUSDT", color: "#00c48c", label: "M" },
+    { sym: "BTC", pair: "BTCUSDT", color: "#f7931a", label: "₿", name: "bitcoin" },
+    { sym: "ETH", pair: "ETHUSDT", color: "#627eea", label: "Ξ", name: "ethereum" },
+    { sym: "SOL", pair: "SOLUSDT", color: "#9945ff", label: "S", name: "solana" },
+    { sym: "XRP", pair: "XRPUSDT", color: "#23292f", label: "X", name: "ripple" },
+    { sym: "BNB", pair: "BNBUSDT", color: "#f0b90b", label: "B", name: "binance coin" },
+    { sym: "NEAR", pair: "NEARUSDT", color: "#00c08b", label: "N", name: "near protocol" },
+    { sym: "SUI", pair: "SUIUSDT", color: "#4da2ff", label: "S", name: "sui" },
+    { sym: "ARB", pair: "ARBUSDT", color: "#12aaff", label: "A", name: "arbitrum" },
+    { sym: "TAO", pair: "TAOUSDT", color: "#e8e8e8", label: "τ", name: "bittensor" },
+    { sym: "LINK", pair: "LINKUSDT", color: "#2a5ada", label: "⬡", name: "chainlink" },
+    { sym: "UNI", pair: "UNIUSDT", color: "#ff66b2", label: "U", name: "uniswap" },
+    { sym: "ZEC", pair: "ZECUSDT", color: "#f4b728", label: "Z", name: "zcash" },
+    { sym: "ONDO", pair: "ONDOUSDT", color: "#3f6fe0", label: "O", name: "ondo finance" },
+    { sym: "ENA", pair: "ENAUSDT", color: "#5b6470", label: "E", name: "ethena" },
+    { sym: "PHA", pair: "PHAUSDT", color: "#7c5cff", label: "PH", name: "phala network" },
+    { sym: "JUP", pair: "JUPUSDT", color: "#4fae4f", label: "J", name: "jupiter" },
+    { sym: "FET", pair: "FETUSDT", color: "#1b2a4a", label: "F", name: "artificial superintelligence alliance" },
+    { sym: "ZRO", pair: "ZROUSDT", color: "#2b2b2b", label: "Ø", name: "layerzero" },
+    { sym: "LTC", pair: "LTCUSDT", color: "#345d9d", label: "Ł", name: "litecoin" },
+    { sym: "QNT", pair: "QNTUSDT", color: "#5b8def", label: "Q", name: "quant network" },
+    { sym: "GRASS", pair: "GRASSUSDT", color: "#8bc34a", label: "G", name: "grass" },
+    { sym: "EIGEN", pair: "EIGENUSDT", color: "#1b1b4d", label: "E", name: "eigenlayer" },
+    { sym: "KAITO", pair: "KAITOUSDT", color: "#111111", label: "K", name: "kaito" },
+    { sym: "MNT", pair: "MNTUSDT", color: "#00c48c", label: "M", name: "mantle" },
   ];
 
   const BY_SYM = {};
@@ -51,11 +51,13 @@ const DataLib = (() => {
     { id: "anomaly", name: "Продолжение аномалии", short: "Продолжение ано.", tf: "15м", desc: "ROC(10) > 2% при RSI 55–75" },
   ];
 
+  // стартовые цены до первого ответа источников (реальные уровни на момент релиза;
+  // через ~4с всё перекрывается live-тикерами, недостающие монеты докачиваются индивидуально)
   const DEFAULT_PRICES = {
-    BTC: 82200, ETH: 2725, SOL: 138, XRP: 2.14, BNB: 610, NEAR: 5.28, SUI: 1.02,
-    ARB: 0.43, TAO: 389, LINK: 14.1, UNI: 8.4, ZEC: 53.9, ONDO: 0.48, ENA: 0.24,
-    PHA: 0.063, JUP: 0.33, FET: 0.24, ZRO: 32.1, LTC: 12.45, QNT: 192.7,
-    GRASS: 1.31, EIGEN: 2.09, KAITO: 1.66, MNT: 1.18,
+    BTC: 81315, ETH: 2388, SOL: 102.5, XRP: 1.279, BNB: 716.5, NEAR: 4.76, SUI: 0.964,
+    ARB: 0.18, TAO: 263, LINK: 11.83, UNI: 7.12, ZEC: 1110, ONDO: 0.43, ENA: 0.183,
+    PHA: 0.0498, JUP: 0.283, FET: 0.188, ZRO: 1.76, LTC: 59, QNT: 191.7,
+    GRASS: 0.585, EIGEN: 0.233, KAITO: 0.275, MNT: 0.525,
   };
 
   function seedSpark(price, seed) {

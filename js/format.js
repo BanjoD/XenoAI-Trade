@@ -39,6 +39,16 @@ const Fmt = (() => {
     const abs = Math.abs(v);
     return abs.toLocaleString("ru-RU", { minimumFractionDigits: abs < 100 ? 2 : 0, maximumFractionDigits: 2 });
   }
+  // долларовый эквивалент ХРЮ (курс 1:1): профит/убыток в хрювнах = долларовый
+  function fmtUsd(v, dec) {
+    const abs = Math.abs(v);
+    const d = dec == null ? (abs >= 1000 || Number.isInteger(abs) ? 0 : 2) : dec;
+    return "$" + abs.toLocaleString("ru-RU", { minimumFractionDigits: d, maximumFractionDigits: d });
+  }
+  function fmtUsdSigned(v, dec) {
+    const sign = v > 0 ? "+" : v < 0 ? "−" : "";
+    return sign + fmtUsd(v, dec);
+  }
   function fmtNum(v, dec) {
     return Number(v).toLocaleString("ru-RU", { minimumFractionDigits: dec || 0, maximumFractionDigits: dec || 0 });
   }
@@ -65,7 +75,7 @@ const Fmt = (() => {
   function fmtClockShort(ms) {
     return new Date(ms).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
   }
-  return { fmtMoney, fmtCompact, fmtPct, fmtPrice, fmtHru, fmtNum, fmtHeld, fmtTimeAgo, fmtClock, fmtClockShort };
+  return { fmtMoney, fmtCompact, fmtPct, fmtPrice, fmtHru, fmtUsd, fmtUsdSigned, fmtNum, fmtHeld, fmtTimeAgo, fmtClock, fmtClockShort };
 })();
 
 window.Fmt = Fmt;

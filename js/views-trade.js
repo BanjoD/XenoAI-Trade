@@ -193,20 +193,73 @@ const ViewsTrade = (() => {
         <span class="ai-ico">${h.icon("sparkles", 17)}</span>
         <div style="min-width:0;flex:1">
           <div class="ai-title">Сделка на базе ИИ</div>
-          <div class="ai-sub">ML-ансамбль 7 индикаторов · спот · свечи 15м</div>
+          <div class="ai-sub">ML-ансамбль 8 индикаторов · новости · учится на каждой сделке</div>
         </div>
         ${live ? "" : `<button class="ai-auto-pill ${s.aiAuto ? "on" : ""}" data-action="ai:auto" title="ИИ сам заходит в монеты и флипает">
           <span class="d"></span> автопилот ${s.aiAuto ? "вкл" : "выкл"}
         </button>`}
       </div>`;
 
+    // ---- сессия автопилота: прогресс к авто-стопу ±лимит (по умолчанию 50%) ----
+    let sessionHtml = "";
+    const sess = Store.aiSessionInfo();
+    const th = s.aiThreshold || 50;
+    if (sess && (s.aiAuto || s.aiStop)) {
+      const pct = Math.max(-th, Math.min(th, sess.pct));
+      const markerPos = 50 + (pct / th) * 50;
+      const n = sess.trades;
+      const plural = (n % 10 === 1 && n % 100 !== 11) ? "ка" : ([2, 3, 4].indexOf(n % 10) !== -1 && (n % 100 < 10 || n % 100 >= 20)) ? "ки" : "ок";
+      sessionHtml = `
+      <div class="ai-session${s.aiStop ? " stopped" : ""}">
+        <div class="row">
+          <span>сессия ИИ · ${n} сдел${plural}${sess.open ? ` · ${sess.open} в рынке` : ""}</span>
+          <span class="num ${sess.pct >= 0 ? "text-green" : "text-red"}">${sess.pct >= 0 ? "+" : "−"}${Math.abs(sess.pct).toFixed(2)}% · ${Fmt.fmtUsdSigned(sess.pnl)}</span>
+          <span class="lim num">авто-стоп ±${th}%</span>
+        </div>
+        <div class="bar"><i class="m" style="left:${markerPos}%"></i><i class="z"></i></div>
+      </div>`;
+    }
+
+    // ---- настройка лимита сессии: пресеты + свой ввод ----
+    const presets = [10, 15, 25, 50, 75, 100];
+    const limitHtml = `
+      <div class="ai-limit-row">
+        <span class="lbl">${h.icon("shield", 12)} стоп сессии</span>
+        <div class="limit-chips">${presets.map((v) => `<button class="limit-chip num ${th === v ? "active" : ""}" data-action="ai:limit" data-arg="${v}">±${v}%</button>`).join("")}</div>
+        <span class="custom-wrap">
+          <input id="ai-limit-input" class="inp num" data-role="ai-limit" inputmode="numeric" placeholder="${th}" value="" title="Свой лимит сессии, % от 5 до 500">
+          <span class="pct">%</span>
+          <button class="limit-apply" data-action="ai:limit-apply" title="Применить свой лимит">OK</button>
+        </span>
+      </div>
+      <div class="ai-limit-note">Курс ХРЮ = $1: при базе ${Fmt.fmtUsd(sess ? sess.startBase || 0 : 0)} лимит ±${th}% — это ±${Fmt.fmtUsd(sess ? (sess.startBase || 0) * th / 100 : 0)} к результату сессии. При его достижении автопилот закроет все ИИ-сделки по рынку и выключится.</div>`;
+
+    // ---- авто-стоп сработал: баннер с причиной и возобновлением ----
+    let stopHtml = "";
+    if (s.aiStop) {
+      const p = s.aiStop.pct;
+      const sth = s.aiStop.threshold || th;
+      stopHtml = `
+      <div class="ai-stop-banner">
+        <div class="t">${h.icon("shield", 14)} ${s.aiStop.reason === "profit" ? "Цель сессии достигнута — профит зафиксирован" : "Сработала защита от просадки"}</div>
+        <div class="d">Результат ИИ-сессии <b class="num ${p >= 0 ? "text-green" : "text-red"}">${p >= 0 ? "+" : "−"}${Math.abs(p).toFixed(2)}% (${Fmt.fmtUsdSigned(sess ? sess.pnl : 0)})</b> ${p >= 0 ? `≥ +${sth}%` : `≤ −${sth}%`} — автопилот закрыл все ИИ-сделки по рынку${s.aiStop.closed != null ? ` (${s.aiStop.closed} шт.)` : ""} и ждёт возобновления работы. Возобновите — начнётся новая сессия с чистой базой ±${sth}%.</div>
+        <button class="ai-open" data-action="ai:auto">Возобновить автопилот · новая сессия</button>
+      </div>`;
+    }
+
+    // ---- мини-статистика памяти ИИ ----
+    const brain = s.aiBrain || {};
+    const wr = brain.trades ? Math.round((brain.wins / brain.trades) * 100) : null;
+    const brainMini = `<div class="ai-brain-mini num">${h.icon("cpu", 11)} опыт: ${brain.trades || 0} сделок${wr != null ? ` · винрейт ${wr}%` : ""} · порог входа ${brain.confThreshold || 76}% · память ${brain.weights ? "адаптирована" : "базовая"}</div>`;
+
     let body = "";
     if (!fresh) {
       body = `
         <button class="ai-cta" data-action="ai:analyze" data-arg="${sym}">${h.icon("sparkles", 14)} Проанализировать ${sym} и дать вердикт</button>
-        <div class="ai-help">ИИ взвешивает тренд, RSI, MACD, Боллинджера, Ишимоку, объём и импульс, сам выбирает
-        направление, стоп и цель. Только спот: «лонг» — тренд вверх, «шорт» — тренд вниз. Мощная скам-защита:
-        в аномалии и низколиквидные монеты ИИ не заходит. ${live ? "В реальном режиме вердикт подскажет вход — ордер отправите кнопкой ниже." : "Автопилот может открывать и флипать сделки сам."}</div>`;
+        <div class="ai-help">ИИ взвешивает тренд, RSI, MACD, Боллинджера, Ишимоку, объём, импульс и новостной фон,
+        сам выбирает направление, стоп и цель. Только спот: «лонг» — тренд вверх, «шорт» — тренд вниз. Мощная защита:
+        скам-фильтр, новостные риски и авто-стоп сессии ±${th}% (лимит настраивается ниже). После каждой закрытой сделки ИИ корректирует веса факторов —
+        с каждой сделкой становится аккуратнее. ${live ? "В реальном режиме вердикт подскажет вход — ордер отправите кнопкой ниже." : "Автопилот может открывать и флипать сделки сам."}</div>`;
     } else {
       const r = fresh.res;
       if (r.verdict === "wait") {
@@ -239,14 +292,14 @@ const ViewsTrade = (() => {
           ${live
             ? `<button class="ai-open" data-action="live:order-ai">Отправить рыночный ордер по сигналу ИИ</button>`
             : s.balance >= 200
-              ? `<button class="ai-open" data-action="ai:open">Открыть ${r.verdict} по сигналу ИИ · ${sizeStr} ХРЮ</button>`
+              ? `<button class="ai-open" data-action="ai:open">Открыть ${r.verdict} по сигналу ИИ · ${sizeStr} ХРЮ (≈ ${Fmt.fmtUsd(Math.min(size, Math.max(0, Math.round(s.balance))))})</button>`
               : `<div class="ai-wait">Минимум для ИИ-сделки — 200 ХРЮ. Пополните демо-счёт в кабинете.</div>`}
-          <div class="ai-ts"><span>расчёт ${Fmt.fmtClock(fresh.ts)} · RR 1:2 · спот</span><button class="link-btn" data-action="ai:analyze" data-arg="${sym}">пересчитать</button></div>
+          <div class="ai-ts"><span>расчёт ${Fmt.fmtClock(fresh.ts)} · RR 1:2 · спот · веса ИИ ${s.aiBrain && s.aiBrain.weights ? "адаптированы" : "базовые"}</span><button class="link-btn" data-action="ai:analyze" data-arg="${sym}">пересчитать</button></div>
         </div>`;
       }
     }
 
-    return `<div class="ai-block">${head}${body}</div>`;
+    return `<div class="ai-block">${head}${sessionHtml}${live ? "" : limitHtml}${stopHtml}${brainMini}${body}</div>`;
   }
 
   // ================= форма сделки (демо ХРЮ / реальный рынок) =================
@@ -275,7 +328,7 @@ const ViewsTrade = (() => {
       ${aiBlock(f.sym)}
       <div class="tform-head">
         <span class="tform-title">Новая демо-сделка</span>
-        <span class="tform-free num">свободно ${Fmt.fmtNum(s.balance)} ХРЮ</span>
+        <span class="tform-free num">свободно ${Fmt.fmtNum(s.balance)} ХРЮ ≈ ${Fmt.fmtUsd(s.balance)}</span>
       </div>
       ${syms}
       <div class="seg2">
@@ -295,9 +348,9 @@ const ViewsTrade = (() => {
         <div><div class="k">цель +4%</div><div class="text-green">${fmtPrice(target)}</div></div>
       </div>
       <button class="btn-open ${f.side === "лонг" ? "long" : "short"}" data-action="form:submit">
-        ${f.side === "лонг" ? "Открыть лонг" : "Открыть шорт"} · ${sizeNum ? Fmt.fmtNum(sizeNum) : "0"} ХРЮ
+        ${f.side === "лонг" ? "Открыть лонг" : "Открыть шорт"} · ${sizeNum ? Fmt.fmtNum(sizeNum) : "0"} ХРЮ${sizeNum ? ` (≈ ${Fmt.fmtUsd(sizeNum)})` : ""}
       </button>
-      <p class="tform-note">Спот · без плеча · виртуальные хрювны · исполнение по реальной рыночной цене</p>
+      <p class="tform-note">Спот · без плеча · курс 1 ХРЮ = $1 — профит/убыток в хрювнах равен долларовому · исполнение по реальной рыночной цене</p>
     </div>`;
   }
 
@@ -353,6 +406,37 @@ const ViewsTrade = (() => {
   }
 
   // ================= СДЕЛКИ =================
+  // ================= моя статистика (мои демо-сделки) =================
+  function myStatsBlock() {
+    const s = S();
+    const closed = s.userClosed;
+    const wins = closed.filter((c) => c.pnl > 0);
+    const losses = closed.filter((c) => c.pnl <= 0);
+    const total = closed.reduce((sum, c) => sum + c.pnl, 0);
+    const winrate = closed.length ? (wins.length / closed.length) * 100 : 0;
+    const avg = closed.length ? total / closed.length : 0;
+    const best = closed.length ? Math.max.apply(null, closed.map((c) => c.pnl)) : 0;
+    const worst = closed.length ? Math.min.apply(null, closed.map((c) => c.pnl)) : 0;
+    let unreal = 0, volume = 0, holdSum = 0;
+    for (const p of s.userPositions) {
+      const price = (s.prices[p.sym] && s.prices[p.sym].price) || p.entry;
+      unreal += Engine.positionPnl(p, price).pnl;
+      volume += p.size;
+      holdSum += Date.now() - p.openedAt;
+    }
+    const heldMid = s.userPositions.length ? holdSum / s.userPositions.length / 60000 : 0;
+    return `<div class="stat-grid cols4">
+      ${h.statCard("Реализовано", h.hruAmount(total, true, total >= 0 ? "text-green" : "text-red"), "",
+        closed.length ? `${closed.length} закрытых · ≈ ${Fmt.fmtUsdSigned(total)} · комиссия 0.1% учтена` : "нет закрытых сделок")}
+      ${h.statCard("Винрейт", closed.length ? `${Math.round(winrate)}%` : "—", closed.length ? (winrate >= 50 ? "text-green" : "text-red") : "text-dim",
+        closed.length ? `${wins.length} в плюс · ${losses.length} в минус` : "откройте первую сделку")}
+      ${h.statCard("Средняя сделка", closed.length ? h.hruAmount(avg, true, avg >= 0 ? "text-green" : "text-red") : "—", "",
+        closed.length ? `лучшая ${h.hruAmount(best, true)} · худшая ${h.hruAmount(worst, true)}` : "статистика появится после закрытия")}
+      ${h.statCard("В рынке", h.hruAmount(unreal, true, unreal >= 0 ? "text-green" : "text-red"), "",
+        `${s.userPositions.length} позиц. · объём ${Fmt.fmtNum(Math.round(volume))} ХРЮ ≈ ${Fmt.fmtUsd(Math.round(volume))}${s.userPositions.length ? ` · в среднем ${Fmt.fmtHeld(heldMid)}` : ""}`)}
+    </div>`;
+  }
+
   function trades() {
     const s = S();
     const tab = s._tradesTab || "user";
@@ -429,6 +513,7 @@ const ViewsTrade = (() => {
         <h1 class="page-title">Сделки</h1>
         <p class="page-sub">Демо-торговля хрювнами по реальным ценам · открытых: ${s.userPositions.length + s.labPositions.length}</p>
       </div>
+      ${myStatsBlock()}
       <div class="trades-grid">
         <div class="stack-16">
           <section class="card">
@@ -447,7 +532,10 @@ const ViewsTrade = (() => {
                 ${h.tfBar(tab === "user" ? "мои" : "лаборатория", "trades:tab", ["мои", "лаборатория"])}
                 <span class="num" style="font-size:12px;color:#71717a">· ${closed.length}</span>
               </div>
-              <div style="font-size:11.5px;color:#52525b">прибыль после условной комиссии 0.1%</div>
+              <div style="display:flex;align-items:center;gap:10px">
+                <span style="font-size:11.5px;color:#52525b">прибыль после условной комиссии 0.1%</span>
+                ${tab === "user" && s.userClosed.length ? `<button class="btn-ghost" style="padding:5px 10px;font-size:11.5px" data-action="stats:export" title="Скачать историю сделок в CSV">${h.icon("download", 12)} CSV</button>` : ""}
+              </div>
             </div>
             ${closedRows}
           </section>
@@ -692,11 +780,11 @@ const ViewsTrade = (() => {
 
       <section class="card" style="padding:20px">
         <div>
-          <div style="font-size:13px;color:#71717a">Демо-кошелёк · хрювны</div>
-          <div class="port-big num">${Fmt.fmtNum(equity)} ${h.hru(22)}</div>
+          <div style="font-size:13px;color:#71717a">Демо-кошелёк · хрювны (курс 1 ХРЮ = $1)</div>
+          <div class="port-big num">${Fmt.fmtNum(equity)} ${h.hru(22)} <span style="font-size:15px;color:#a1a1aa;font-weight:500">≈ ${Fmt.fmtUsd(equity)}</span></div>
           <div class="num" style="margin-top:8px;font-size:13px">
-            <span class="${equity >= s.startBalance ? "text-green" : "text-red"}">${equity >= s.startBalance ? "+" : "−"}${Fmt.fmtNum(Math.abs(equity - s.startBalance))} ХРЮ</span>
-            <span style="color:#71717a"> · старт ${Fmt.fmtNum(s.startBalance)} ХРЮ</span>
+            <span class="${equity >= s.startBalance ? "text-green" : "text-red"}">${equity >= s.startBalance ? "+" : "−"}${Fmt.fmtNum(Math.abs(equity - s.startBalance))} ХРЮ (${equity >= s.startBalance ? "+" : "−"}${Fmt.fmtUsd(Math.abs(equity - s.startBalance))})</span>
+            <span style="color:#71717a"> · старт ${Fmt.fmtNum(s.startBalance)} ХРЮ ≈ ${Fmt.fmtUsd(s.startBalance)}</span>
           </div>
         </div>
         <div style="margin-top:12px;display:flex;align-items:center;gap:16px;font-size:12px">
@@ -729,10 +817,10 @@ const ViewsTrade = (() => {
             <div class="lr"><span style="display:flex;align-items:center;gap:8px;color:#a1a1aa"><span class="sw" style="background:#ff2d78"></span> Свободно</span><span class="num" style="color:#e4e4e7">${Fmt.fmtNum(Math.round(s.balance))} ХРЮ</span></div>
           </div>
           <div class="info-box">
-            ХРЮ — виртуальная валюта для безопасного теста ИИ и стратегий: сделка списывает хрювны со счёта,
-            закрытие возвращает их с результатом (комиссия 0.1% учтена). В режиме «Реальный рынок» деньги не
-            попадают на платформу — они остаются на вашей бирже/в кошельке, а платформа только отправляет
-            подписанные рыночные ордера от вашего имени.
+            ХРЮ — виртуальная валюта с курсом 1:1 к доллару: 10 000 ХРЮ = $10 000, профит/убыток в хрювнах
+            равен долларовому. Сделка списывает хрювны со счёта, закрытие возвращает их с результатом (комиссия 0.1% учтена).
+            В режиме «Реальный рынок» деньги не попадают на платформу — они остаются на вашей бирже/в кошельке,
+            а платформа только отправляет подписанные рыночные ордера от вашего имени.
           </div>
         </aside>
       </div>
@@ -760,12 +848,13 @@ const ViewsTrade = (() => {
         <span class="cab-icon">${h.hru(26)}</span>
         <div>
           <h2 class="cab-title">Кабинет · демо-торговля</h2>
-          <p class="cab-sub">Виртуальные хрювны · реальные цены Binance</p>
+          <p class="cab-sub">Виртуальные хрювны · курс 1 ХРЮ = $1 · реальные цены Binance</p>
         </div>
       </div>
       <div class="cab-body">
         <div style="font-size:12.5px;color:#71717a">Текущий баланс</div>
         <div class="cab-balance num">${Fmt.fmtNum(s.balance)} ${h.hru(20)} <span class="cur">ХРЮ</span></div>
+        <div class="num" style="margin-top:4px;font-size:13px;color:#a1a1aa">≈ ${Fmt.fmtUsd(s.balance)} · курс ХРЮ привязан к доллару 1:1 — профит/убыток в хрювнах равен долларовому</div>
         <div style="margin-top:16px">
           <label style="font-size:12.5px;color:#a1a1aa" for="hru-input">Впишите любую сумму хрювен на демо-счёт</label>
           <div style="margin-top:6px;display:flex;gap:8px">
@@ -789,7 +878,10 @@ const ViewsTrade = (() => {
       </div>
       <div class="cab-foot">
         <p>Стартовый баланс: ${Fmt.fmtNum(s.startBalance)} ХРЮ. Выгода и убытки считаются по реальным рыночным ценам — но это виртуальные деньги, реальные средства не задействованы.</p>
-        <button class="btn-ghost" data-action="cabinet:reset">Сбросить</button>
+        <div style="display:flex;gap:8px;flex-shrink:0">
+          ${s.userClosed.length ? `<button class="btn-ghost" data-action="stats:export" title="Скачать историю сделок в CSV">${h.icon("download", 13)} CSV</button>` : ""}
+          <button class="btn-ghost" data-action="cabinet:reset">Сбросить</button>
+        </div>
       </div>
     </div>`;
   }

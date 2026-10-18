@@ -71,6 +71,7 @@ const App = (() => {
           <span class="balance-label">Демо-баланс</span>
           <span class="balance-value num" id="sb-balance">${Fmt.fmtNum(s.balance)} ХРЮ</span>
         </div>
+        <div class="balance-usd num" id="sb-usd">≈ ${Fmt.fmtUsd(s.balance)} · курс 1 ХРЮ = $1</div>
         <div class="balance-sub num">
           <span id="sb-btc">BTC $${Fmt.fmtPrice(btc)}</span>
           <span id="sb-live" class="${s.degraded ? "live-deg" : "live-ok"}">${sourceLabel}</span>
@@ -195,6 +196,7 @@ const App = (() => {
       if (cls !== undefined) el.className = cls;
     };
     set("sb-balance", `${Fmt.fmtNum(s.balance)} ХРЮ`);
+    set("sb-usd", `≈ ${Fmt.fmtUsd(s.balance)} · курс 1 ХРЮ = $1`);
     set("mh-balance", `${Fmt.fmtNum(s.balance)} ХРЮ`);
     set("sb-btc", `BTC $${Fmt.fmtPrice(btc)}`);
     set("dt-btc", `BTC $${Fmt.fmtPrice(btc)}`);
@@ -417,11 +419,11 @@ const App = (() => {
           h.toast("info", `Собираю свечи ${sym}…`, "Нажмите «Проанализировать» ещё раз через пару секунд");
           break;
         }
-        const res = Engine.aiAnalyze(sym, bars);
+        const res = Engine.aiAnalyze(sym, bars, s.aiBrain, (s.news && s.news.items) || []);
         if (!res) { h.toast("error", "Недостаточно данных для анализа", "Попробуйте ещё раз через несколько секунд"); break; }
         s._ai = { sym, res, ts: Date.now() };
         if (res.verdict === "wait") h.toast("info", "ИИ: сейчас входа нет", "Факторы разнонаправлены — лучше подождать");
-        else h.toast("success", `ИИ рекомендует: ${res.verdict.toUpperCase()} ${sym}`, `уверенность ${res.confidence}% · стоп/цель по ATR · RR 1:2`);
+        else h.toast("success", `ИИ рекомендует: ${res.verdict.toUpperCase()} ${sym}`, `уверенность ${res.confidence}% · стоп/цель по ATR · RR 1:2 · учтены новости`);
         renderView();
         break;
       }
@@ -432,7 +434,7 @@ const App = (() => {
         if (Date.now() - s._ai.ts > 240000) { h.toast("info", "Расчёт устарел", "Пересчитайте вердикт ИИ"); break; }
         const size = Math.min(1000, Math.max(200, Math.round(s.balance * 0.1)), Math.round(s.balance));
         if (size < 200) { h.toast("error", "Недостаточно хрювен", "Минимум для ИИ-сделки — 200 ХРЮ. Пополните счёт в кабинете"); break; }
-        const out = Store.placeDemo({ sym: r.sym, side: r.verdict, size, lev: 1, stop: r.stop, target: r.target, strategy: "ai", ai: { confidence: r.confidence, note: r.note } });
+        const out = Store.placeDemo({ sym: r.sym, side: r.verdict, size, lev: 1, stop: r.stop, target: r.target, strategy: "ai", ai: { confidence: r.confidence, note: r.note, factors: r.factors, score: r.score } });
         if (!out.ok) { h.toast("error", out.error); break; }
         h.toast("success", `ИИ-сделка открыта: ${r.sym} ${r.verdict}`, `${Fmt.fmtNum(size)} ХРЮ · уверенность ${r.confidence}% · списано со счёта`);
         break;
@@ -443,17 +445,41 @@ const App = (() => {
         Store.toggleAiAuto();
         renderView();
         break;
+      // лимит авто-стопа сессии ИИ (±%): пресеты и свой ввод
+      case "ai:limit": {
+        const out = Store.setAiThreshold(Number(arg));
+        if (!out.ok) { h.toast("error", out.error); break; }
+        h.toast("success", `Лимит сессии ИИ: ±${Math.round(Number(arg))}%`, `при +${Math.round(Number(arg))}% профита или −${Math.round(Number(arg))}% просадки автопилот закроет все ИИ-сделки и выключится`);
+        renderView();
+        break;
+      }
+      case "ai:limit-apply": {
+        const li = document.getElementById("ai-limit-input");
+        const raw = li ? Number(String(li.value).replace(/\s/g, "").replace(",", ".")) : NaN;
+        const res = Store.setAiThreshold(raw);
+        if (!res.ok) { h.toast("error", res.error, "Введите число от 5 до 500"); break; }
+        h.toast("success", `Лимит сессии ИИ: ±${Math.round(raw)}%`, `при +${Math.round(raw)}% профита или −${Math.round(raw)}% просадки автопилот закроет все ИИ-сделки и выключится`);
+        renderView();
+        break;
+      }
       case "ai:open-idea": {
         const idea = (s.aiIdeas || []).find((i) => i.sym === arg);
         if (!idea || idea.res.verdict === "wait") { h.toast("error", "Идея устарела — подождите пересчёта"); break; }
         if (!Store.canTrade()) { h.toast("error", "Сделки может открывать только аккаунт David или Yura"); break; }
         const sz = Math.min(1000, Math.max(200, Math.round(s.balance * 0.1)), Math.round(s.balance));
         if (sz < 200) { h.toast("error", "Недостаточно хрювен", "Пополните демо-счёт в кабинете"); break; }
-        const ideaOut = Store.placeDemo({ sym: idea.sym, side: idea.res.verdict, size: sz, lev: 1, stop: idea.res.stop, target: idea.res.target, strategy: "ai", ai: { confidence: idea.res.confidence, note: idea.res.note } });
+        const ideaOut = Store.placeDemo({ sym: idea.sym, side: idea.res.verdict, size: sz, lev: 1, stop: idea.res.stop, target: idea.res.target, strategy: "ai", ai: { confidence: idea.res.confidence, note: idea.res.note, factors: idea.res.factors, score: idea.res.score } });
         if (!ideaOut.ok) { h.toast("error", ideaOut.error); break; }
         h.toast("success", `Идея ИИ взята: ${idea.sym} ${idea.res.verdict}`, `${Fmt.fmtNum(sz)} ХРЮ · уверенность ${idea.res.confidence}%`);
         break;
       }
+
+      // сброс памяти ИИ (обучение начнётся заново)
+      case "ai:brain-reset":
+        Store.resetBrain();
+        h.toast("info", "Память ИИ сброшена", "Веса факторов вернулись к базовым — обучение начнётся заново");
+        renderView();
+        break;
 
       // сигналы
       case "sig:take": {
@@ -503,6 +529,35 @@ const App = (() => {
 
       // сделки
       case "trades:tab": s._tradesTab = arg === "мои" ? "user" : "lab"; renderView(); break;
+
+      // экспорт истории сделок в CSV
+      case "stats:export": {
+        const rows = s.userClosed;
+        if (!rows.length) { h.toast("error", "Пока нечего экспортировать", "Закройте первую сделку — история появится здесь"); break; }
+        const q = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
+        const lines = ["Дата закрытия;Монета;Направление;Вход;Выход;Объём ХРЮ;PnL ХРЮ;PnL %;Причина;Источник"];
+        for (const c of rows) {
+          const d = new Date(c.closedAt);
+          const src = c.strategy === "ai" ? (c.ai && c.ai.auto ? "ИИ-автопилот" : "Сигнал ИИ") : "Вручную";
+          lines.push([
+            q(d.toLocaleString("ru-RU")), c.sym, c.side,
+            String(c.entry), String(c.exit),
+            String(Math.round(c.size)), (Math.round(c.pnl * 100) / 100).toFixed(2),
+            (Math.round(c.pnlPct * 100) / 100).toFixed(2) + "%", c.exitReason, src,
+          ].join(";"));
+        }
+        const blob = new Blob(["\uFEFF" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        const u = Auth.readSession();
+        a.download = `xenoai-trades-${u ? u.login.toLowerCase() : "demo"}-${new Date().toISOString().slice(0, 10)}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 400);
+        h.toast("success", `История выгружена: ${rows.length} сделок`, "CSV открыт в Excel/Numbers · кодировка UTF-8");
+        break;
+      }
+
       case "pos:close": {
         const pos = s.userPositions.find((p) => p.id === arg);
         const cOut = Store.closeDemo(arg);
@@ -564,6 +619,9 @@ const App = (() => {
         }
       } else if (el.getAttribute && el.getAttribute("data-role") === "cab-balance") {
         const clean = el.value.replace(/[^\d.,\s]/g, "");
+        if (clean !== el.value) el.value = clean;
+      } else if (el.getAttribute && el.getAttribute("data-role") === "ai-limit") {
+        const clean = el.value.replace(/[^\d]/g, "");
         if (clean !== el.value) el.value = clean;
       }
     });

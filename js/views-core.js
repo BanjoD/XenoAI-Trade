@@ -85,8 +85,12 @@ const Views = (() => {
       </div>
 
       <div class="stat-grid cols4">
-        ${h.statCard("ИИ-автопилот", s.aiAuto ? "вкл" : "выкл", s.aiAuto ? "text-green" : "text-dim",
-          `${s.userPositions.filter((p) => p.strategy === "ai").length} ИИ-позиций · ${s.aiIdeas.length} идей в сканере · спот`)}
+        ${(() => {
+          const sess = Store.aiSessionInfo();
+          const sessPct = sess && (s.aiAuto || s.aiStop) ? ` · сессия ${sess.pct >= 0 ? "+" : "−"}${Math.abs(sess.pct).toFixed(1)}%` : "";
+          return h.statCard("ИИ-автопилот", s.aiAuto ? "вкл" : (s.aiStop ? "стоп" : "выкл"), s.aiAuto ? "text-green" : (s.aiStop ? "text-red" : "text-dim"),
+            `${s.userPositions.filter((p) => p.strategy === "ai").length} ИИ-позиций · ${s.aiIdeas.length} идей · авто-стоп ±${s.aiThreshold || 50}%${sessPct}`);
+        })()}
         ${h.statCard("Лучший счёт", `${bestPct >= 0 ? "+" : "−"}${Math.abs(bestPct).toFixed(2)}%`, bestPct >= 0 ? "text-green" : "text-red",
           best ? `${h.esc(best.name)} · баланс ${Fmt.fmtNum(Math.round(best.balance))} ХРЮ` : "—")}
         ${h.statCard("Вся лаборатория", h.hruAmount(labTotal - labStart, true, "text-gold"), "",
@@ -96,8 +100,8 @@ const Views = (() => {
       </div>
 
       <div class="stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr))">
-        ${h.statCard("Демо-счёт (ХРЮ)", `${Fmt.fmtNum(equity)} ХРЮ`, demoPnl >= 0 ? "text-gold" : "text-red",
-          `свободно ${Fmt.fmtNum(s.balance)} ХРЮ · PnL ${h.hruAmount(demoPnl, true)}`)}
+        ${h.statCard("Демо-счёт (ХРЮ)", `${Fmt.fmtNum(equity)} ХРЮ ≈ ${Fmt.fmtUsd(equity)}`, demoPnl >= 0 ? "text-gold" : "text-red",
+          `свободно ${Fmt.fmtNum(s.balance)} ХРЮ ≈ ${Fmt.fmtUsd(s.balance)} · PnL ${h.hruAmount(demoPnl, true)} (${Fmt.fmtUsdSigned(demoPnl)})`)}
         ${h.statCard("Лаборатория · реализовано", h.hruAmount(realizedLab, true), "",
           `${labClosed.length} закрытых сделок · комиссия 0.1% учтена`)}
         ${h.statCard("Сигналов активно", s.signals.length, "",
@@ -126,6 +130,79 @@ const Views = (() => {
   }
 
   // ================= СИГНАЛЫ =================
+  // карточка «Мозг ИИ»: обучение на сделках — адаптивные веса, порог, уроки
+  function brainCard(s) {
+    const b = s.aiBrain || {};
+    const base = Engine.AI_BASE_WEIGHTS;
+    const labels = { trend: "Тренд · EMA50", rsi: "RSI(14)", macd: "MACD", bb: "Боллинджер", ichi: "Ишимоку", vol: "Объём", roc: "Импульс ROC", news: "Новостной фон" };
+    const weightRows = Object.keys(base).map((k) => {
+      const b0 = base[k];
+      const cur = b.weights && b.weights[k] != null ? b.weights[k] : b0;
+      const d = cur / b0 - 1;
+      const delta = Math.abs(d) >= 0.03
+        ? `<span class="num ${d > 0 ? "text-green" : "text-red"}" style="width:44px;text-align:right;flex-shrink:0">${d > 0 ? "▲" : "▼"}${Math.abs(d * 100).toFixed(0)}%</span>`
+        : `<span class="num" style="width:44px;text-align:right;flex-shrink:0;color:#52525b">—</span>`;
+      return `<div class="brain-row">
+        <span class="lbl">${labels[k]}</span>
+        <span class="bar"><i style="width:${Math.min(100, cur * 420)}%"></i></span>
+        <span class="num val">${cur.toFixed(2)}</span>
+        ${delta}
+      </div>`;
+    }).join("");
+    const wr = b.trades ? Math.round((b.wins / b.trades) * 100) : null;
+    const lessons = (b.lessons || []).slice(0, 3).map((l) =>
+      `<div class="brain-lesson"><span class="num">${Fmt.fmtClock(l.ts)}</span><span>${h.esc(l.text)}</span></div>`
+    ).join("") || `<div class="brain-lesson" style="color:#52525b">Выводов пока нет — ИИ сделает их после первых закрытых сделок</div>`;
+    return `
+    <section class="card card-pad">
+      ${h.sectionTitle("Мозг ИИ · самообучение", `<button class="ai-auto-pill on" data-action="ai:brain-reset" title="Сбросить адаптивные веса и уроки" style="color:#d4cbd8">${h.icon("cpu", 12)} память</button>`)}
+      <div class="brain-stats num">
+        <div><div class="k">сделок изучено</div><div>${b.trades || 0}</div></div>
+        <div><div class="k">винрейт</div><div>${wr != null ? wr + "%" : "—"}</div></div>
+        <div><div class="k">порог входа</div><div>${b.confThreshold || 76}%</div></div>
+        <div><div class="k">веса</div><div>${b.weights ? "адаптивные" : "базовые"}</div></div>
+      </div>
+      ${weightRows}
+      <div style="margin-top:12px;font-size:12px;font-weight:600;color:#d4cbd8">Последние выводы ИИ</div>
+      <div class="brain-lessons">${lessons}</div>
+      <p style="margin-top:10px;font-size:11.5px;line-height:1.65;color:#71717a">
+        После каждой закрытой ИИ-сделки (вручную, по цели/стопу или флипом автопилота) ИИ раскладывает результат по факторам:
+        чей сигнал оправдался — получает чуть больше веса, кто вёл в убыток — теряет вес. Серии минусов по монете снижают
+        уверенность на ней, а общий винрейт калибрует порог входа (76–88%). Память хранится у аккаунта и переживает перезагрузку.
+      </p>
+    </section>`;
+  }
+
+  // карточка «Новостной фон»: реальная лента + сентимент, который учитывает ИИ
+  function newsCard(s) {
+    const news = s.news || { items: [] };
+    const items = (news.items || []).slice(0, 4);
+    let inner;
+    if (!items.length) {
+      inner = `<div class="empty">Новостной источник ещё не ответил — ИИ торгует по индикаторам. Лента подключится автоматически.</div>`;
+    } else {
+      const ns = Engine.newsSentiment(news.items, null);
+      const toneLabel = ns.global > 0.08 ? "бычий фон" : ns.global < -0.08 ? "медвежий фон" : "нейтральный фон";
+      const toneCls = ns.global > 0.08 ? "text-green" : ns.global < -0.08 ? "text-red" : "text-dim";
+      const rows = items.map((it) => {
+        const sen = Engine.newsSentiment([it], null);
+        const arrow = sen.global > 0.08 ? `<span class="dir up">▲</span>` : sen.global < -0.08 ? `<span class="dir down">▼</span>` : `<span class="dir flat">•</span>`;
+        const ageMin = Math.max(1, Math.round((Date.now() - it.ts) / 60000));
+        const ago = ageMin < 60 ? `${ageMin} мин` : ageMin < 1440 ? `${Math.round(ageMin / 60)} ч` : `${Math.round(ageMin / 1440)} дн`;
+        return `<div class="news-row">${arrow}<div class="tt"><a href="${h.esc(it.link)}" target="_blank" rel="noopener" class="news-link">${h.esc(it.title)}</a></div><span class="num ago">${ago}</span></div>`;
+      }).join("");
+      inner = `
+        <div class="news-sent num">сентимент ленты: <span class="${toneCls}">${ns.global >= 0 ? "+" : "−"}${Math.abs(ns.global).toFixed(2)} · ${toneLabel}</span> · ${ns.bull}↑ / ${ns.bear}↓</div>
+        <div class="news-rows">${rows}</div>
+        <div style="margin-top:8px;font-size:11px;color:#71717a">Источник: ${h.esc(news.source || "rss")} · обновление каждые 5 мин · ИИ учитывает этот фон как 8-й фактор и блокирует входы при медвежьих новостях по монете</div>`;
+    }
+    return `
+    <section class="card card-pad">
+      ${h.sectionTitle("Новостной фон · анализ ИИ")}
+      ${inner}
+    </section>`;
+  }
+
   function signals() {
     const s = S();
 
@@ -201,17 +278,22 @@ const Views = (() => {
 
       <section class="card card-pad" style="border-color:rgba(255,45,120,.22)">
         ${h.sectionTitle("ИИ-сканер · лучшие идеи по рынку", `<span style="display:flex;align-items:center;gap:8px">
-          <span style="font-size:12px;color:#71717a">ML-ансамбль · скам-защита</span>
+          <span style="font-size:12px;color:#71717a">ML-ансамбль · скам- и новостная защита</span>
           <button class="ai-auto-pill ${s.aiAuto ? "on" : ""}" data-action="ai:auto"><span class="d"></span>автопилот</button></span>`)}
         ${scanner}
         <p style="margin-top:10px;font-size:12px;line-height:1.6;color:#71717a">
           ИИ прогоняет через ML-ансамбль все ${DataLib.WATCHLIST.length} монет на каждой свежей свече 15м: тренд к EMA50, MACD, RSI,
-          Боллинджер, Ишимоку, объёмные аномалии и импульс. Заходит только туда, где видит потенциал роста и несколько
-          подтверждающих факторов. Склам-защита отсекает низколиквидные и аномальные монеты. Когда факторы разворачиваются —
-          ИИ флипает позицию сам, ультра-быстрые выходы отрабатывают на каждом тике цены.
+          Боллинджер, Ишимоку, объёмные аномалии, импульс и новостной фон из реальной ленты. Заходит только туда, где видит
+          потенциал и несколько подтверждающих факторов. Скам-защита отсекает низколиквидные и аномальные монеты, новостная
+          защита — монеты под медвежьим информационным давлением. Когда факторы разворачиваются — ИИ флипает позицию сам.
+          Сессия автопилота автоматически останавливается при +${s.aiThreshold || 50}% профита или −${s.aiThreshold || 50}% просадки:
+          закрывает все ИИ-сделки по рынку и ждёт возобновления. Лимит настраивается в блоке ИИ на Рынке/в Сделках.
           ${s.aiAuto ? "Автопилот вкл: ИИ входит и флипает на вашем демо-счёте сам." : "Автопилот выкл: входите вручную кнопкой на идее."}
         </p>
       </section>
+
+      ${brainCard(s)}
+      ${newsCard(s)}
 
       ${rows}
 
