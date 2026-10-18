@@ -447,7 +447,7 @@ const ViewsTrade = (() => {
       : `<div class="rows row-divide">` + s.userPositions.map((p) => {
           const price = (s.prices[p.sym] && s.prices[p.sym].price) || p.entry;
           const { pnl, pct } = Engine.positionPnl(p, price);
-          return `<div class="trow">
+          return `<div class="trow" data-pos-sym="${p.sym}" data-pos-side="${p.side}" data-pos-entry="${p.entry}" data-pos-size="${p.size}" data-pos-lev="${p.lev || 1}">
             ${h.coin(p.sym, 36)}
             <div style="min-width:0;flex:1">
               <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px">
@@ -459,8 +459,8 @@ const ViewsTrade = (() => {
               <div class="num" style="margin-top:2px;font-size:11.5px;color:#71717a">${Fmt.fmtNum(p.size)} ХРЮ · вход ${fmtPrice(p.entry)} · стоп ${fmtPrice(p.stop)} · цель ${fmtPrice(p.target)} · ${Fmt.fmtHeld((Date.now() - p.openedAt) / 60000)}</div>
             </div>
             <div class="row-right">
-              <div class="num ${pnl >= 0 ? "text-green" : "text-red"}" style="font-size:14.5px;font-weight:600">${h.hruAmount(pnl, true)}</div>
-              <div class="num ${pct >= 0 ? "text-green" : "text-red"}" style="font-size:12px">${pct >= 0 ? "+" : "−"}${Math.abs(pct).toFixed(2)}%</div>
+              <div data-pnl-main class="num ${pnl >= 0 ? "text-green" : "text-red"}" style="font-size:14.5px;font-weight:600">${h.hruAmount(pnl, true)} <span style="font-size:11px;opacity:.75">(${Fmt.fmtUsdSigned(pnl)})</span></div>
+              <div data-pnl-pct class="num ${pct >= 0 ? "text-green" : "text-red"}" style="font-size:12px">${pct >= 0 ? "+" : "−"}${Math.abs(pct).toFixed(2)}%</div>
             </div>
             <button class="btn-close" data-action="pos:close" data-arg="${p.id}">Закрыть</button>
           </div>`;
@@ -472,7 +472,7 @@ const ViewsTrade = (() => {
           const price = (s.prices[p.sym] && s.prices[p.sym].price) || p.entry;
           const { pnl, pct } = Engine.positionPnl(p, price);
           const strat = Engine.STRATEGIES.find((x) => x.id === p.strategy);
-          return `<div class="trow">
+          return `<div class="trow" data-pos-sym="${p.sym}" data-pos-side="${p.side}" data-pos-entry="${p.entry}" data-pos-size="${p.size}" data-pos-lev="${p.lev || 1}">
             ${h.coin(p.sym, 36)}
             <div style="min-width:0;flex:1">
               <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px">
@@ -483,8 +483,8 @@ const ViewsTrade = (() => {
               <div class="num" style="margin-top:2px;font-size:11.5px;color:#71717a">${Fmt.fmtNum(p.size)} ХРЮ · вход ${fmtPrice(p.entry)} · цель ${fmtPrice(p.target)} · ${Fmt.fmtHeld((Date.now() - p.openedAt) / 60000)}</div>
             </div>
             <div class="row-right">
-              <div class="num ${pnl >= 0 ? "text-green" : "text-red"}" style="font-size:14px;font-weight:600">${h.hruAmount(pnl, true)}</div>
-              <div class="num ${pct >= 0 ? "text-green" : "text-red"}" style="font-size:11.5px">${pct >= 0 ? "+" : "−"}${Math.abs(pct).toFixed(2)}%</div>
+              <div data-pnl-main class="num ${pnl >= 0 ? "text-green" : "text-red"}" style="font-size:14px;font-weight:600">${h.hruAmount(pnl, true)} <span style="font-size:10.5px;opacity:.75">(${Fmt.fmtUsdSigned(pnl)})</span></div>
+              <div data-pnl-pct class="num ${pct >= 0 ? "text-green" : "text-red"}" style="font-size:11.5px">${pct >= 0 ? "+" : "−"}${Math.abs(pct).toFixed(2)}%</div>
             </div>
           </div>`;
         }).join("") + `</div>`;
@@ -748,15 +748,15 @@ const ViewsTrade = (() => {
             const x = i / 11;
             spark.push(p.entry + (price - p.entry) * Math.pow(x, 1.3));
           }
-          return `<div class="row" style="flex-wrap:wrap">
+          return `<div class="row" style="flex-wrap:wrap" data-pos-sym="${p.sym}" data-pos-side="${p.side}" data-pos-entry="${p.entry}" data-pos-size="${p.size}" data-pos-lev="${p.lev || 1}">
             ${h.coin(p.sym, 34)}
             <div style="min-width:0;flex:1">
               <div style="font-size:13.5px;font-weight:600">${p.sym} <span style="font-size:11px;color:#71717a">${p.side}${p.strategy === "ai" && p.ai && p.ai.auto ? " · ИИ-автопилот" : p.strategy === "ai" ? " · ИИ" : ""}</span></div>
-              <div class="num" style="font-size:11.5px;color:#71717a">${Fmt.fmtNum(p.size)} ХРЮ · ${fmtPrice(p.entry)} → ${fmtPrice(price)}</div>
+              <div class="num" style="font-size:11.5px;color:#71717a">${Fmt.fmtNum(p.size)} ХРЮ · ${fmtPrice(p.entry)} → <span data-pnl-price>${fmtPrice(price)}</span></div>
             </div>
             <div style="width:110px;text-align:right">
-              <span class="num ${pnl >= 0 ? "text-green" : "text-red"}" style="font-size:13.5px;font-weight:500">${h.hruAmount(pnl, true)}</span>
-              ${h.pctText(pct, "block")}
+              <span data-pnl-main class="num ${pnl >= 0 ? "text-green" : "text-red"}" style="font-size:13.5px;font-weight:500">${h.hruAmount(pnl, true)} <span style="font-size:11px;opacity:.75">(${Fmt.fmtUsdSigned(pnl)})</span></span>
+              <span data-pnl-pct class="num block ${pct >= 0 ? "text-green" : "text-red"}" style="font-size:11.5px">${pct >= 0 ? "+" : "−"}${Math.abs(pct).toFixed(2)}%</span>
             </div>
             ${Charts.spark(spark, { w: 70, h: 24, color: pct >= 0 ? "#ff4fa3" : "#f87171" })}
             <button class="btn-close" data-action="pos:close" data-arg="${p.id}">Закрыть</button>

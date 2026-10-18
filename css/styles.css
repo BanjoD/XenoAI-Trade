@@ -556,6 +556,9 @@ input[type="range"] { width: 64px; accent-color: var(--accent); }
 .lm-conn.ok { border-color: rgba(255, 45, 120, 0.25); background: rgba(255, 45, 120, 0.06); }
 
 /* ================= Сделки ================= */
+/* min-width:0 — grid-колонки могут сжиматься: иначе строка чипов выбора монеты
+   (min-content ~840px) распирает колонку формы и даёт горизонтальный скролл на мобильных */
+.trades-grid > * { min-width: 0; }
 .trades-grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
 @media (min-width: 1280px) { .trades-grid { grid-template-columns: 1fr 320px; } }
 .trow { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid rgba(255, 255, 255, 0.04); }

@@ -23,6 +23,84 @@ const App = (() => {
   ];
   const MOBILE_MAIN = ["desk", "market", "trades", "signals"];
 
+  // ---------- URL-роутинг: у каждой вкладки свой адрес ----------
+  // На http(s) — чистые пути /signals, /trades (на Vercel vercel.json отдаёт index.html
+  // на любой путь). Локально с файла — hash-режим #/signals. F5, «назад/вперёд» и ссылки
+  // сохраняют вкладку — URL можно отправлять другим.
+  const VIEW_IDS = ["desk", "signals", "whales", "market", "events", "trades", "accounts", "portfolio", "leaders"];
+  const VIEW_TITLES = { desk: "Деск", signals: "Сигналы", whales: "Киты", market: "Рынок", events: "События", trades: "Сделки", accounts: "Счета", portfolio: "Портфель", leaders: "Лидеры" };
+  const BASE_TITLE = "XenoAI Trade — платформа автоматического ИИ-трейдинга";
+  let hashNav = false;
+  function isHttp() { return location.protocol === "http:" || location.protocol === "https:"; }
+  function viewFromUrl() {
+    let v = "";
+    if (isHttp()) {
+      const m = location.pathname.match(/^\/([a-z]{3,10})\/?$/i);
+      if (m) v = m[1].toLowerCase();
+    }
+    if (!v && location.hash) {
+      const m = location.hash.match(/^#\/([a-z]{3,10})/i);
+      if (m) v = m[1].toLowerCase();
+    }
+    return VIEW_IDS.indexOf(v) !== -1 ? v : "";
+  }
+  function applyUrl(v) {
+    try {
+      if (isHttp()) {
+        const url = v === "desk" ? "/" : "/" + v;
+        if (location.pathname + location.hash !== url) history.pushState({ view: v }, "", url);
+      } else {
+        const hh = "#/" + v;
+        if (location.hash !== hh) {
+          hashNav = true;
+          location.hash = hh;
+          setTimeout(() => { hashNav = false; }, 0);
+        }
+      }
+    } catch (e) { /* file:// может запретить — не критично */ }
+  }
+  function onUrlChange() {
+    const v = viewFromUrl() || "desk";
+    if (v !== view) navigate(v);
+  }
+
+  // ---------- живой PnL: мгновенное обновление цифр без перерисовки экрана ----------
+  // Позиции в DOM помечены data-pos-* (монета/сторона/вход/объём/плечо), ячейки —
+  // data-pnl-main / data-pnl-pct / data-pnl-price. Патчер каждую секунду (и на каждом
+  // тике WebSocket) пересчитывает PnL по свежим ценам и обновляет только эти узлы —
+  // без полного ререндера, без ожидания опросов и без конфликта с вводом в формы.
+  function patchPnl() {
+    const rows = document.querySelectorAll("[data-pos-sym]");
+    if (!rows.length) return;
+    const prices = Store.state.prices;
+    for (const row of rows) {
+      const tk = prices[row.getAttribute("data-pos-sym")];
+      if (!tk || !(tk.price > 0)) continue;
+      const entry = Number(row.getAttribute("data-pos-entry"));
+      const size = Number(row.getAttribute("data-pos-size"));
+      if (!(entry > 0) || !(size > 0)) continue;
+      const lev = Number(row.getAttribute("data-pos-lev")) || 1;
+      const dir = row.getAttribute("data-pos-side") === "лонг" ? 1 : -1;
+      const pct = ((tk.price / entry - 1) * 100) * dir;
+      const pnl = size * lev * (pct / 100);
+      const cls = pnl >= 0 ? "text-green" : "text-red";
+      const main = row.querySelector("[data-pnl-main]");
+      if (main) {
+        main.classList.toggle("text-green", pnl >= 0);
+        main.classList.toggle("text-red", pnl < 0);
+        main.innerHTML = `${h.hruAmount(pnl, true)} <span style="font-size:11px;opacity:.75">(${Fmt.fmtUsdSigned(pnl)})</span>`;
+      }
+      const pctEl = row.querySelector("[data-pnl-pct]");
+      if (pctEl) {
+        pctEl.classList.toggle("text-green", pct >= 0);
+        pctEl.classList.toggle("text-red", pct < 0);
+        pctEl.textContent = `${pct >= 0 ? "+" : "−"}${Math.abs(pct).toFixed(2)}%`;
+      }
+      const priceEl = row.querySelector("[data-pnl-price]");
+      if (priceEl) priceEl.textContent = Fmt.fmtPrice(tk.price);
+    }
+  }
+
   function badgeFor(id) {
     const s = Store.state;
     if (id === "events") return s.events.length;
@@ -224,8 +302,10 @@ const App = (() => {
 
   // навигация
   function navigate(v) {
-    view = v;
+    view = VIEW_IDS.indexOf(v) !== -1 ? v : "desk";
     moreOpen = false;
+    applyUrl(view);
+    document.title = (VIEW_TITLES[view] ? VIEW_TITLES[view] + " · " : "") + BASE_TITLE;
     renderView();
     // активные пункты
     document.querySelectorAll("[data-action=nav]").forEach((b) => {
@@ -272,7 +352,7 @@ const App = (() => {
     Store.switchUser();
     setTimeout(() => {
       document.getElementById("root").innerHTML = shellHtml();
-      navigate("desk");
+      navigate(viewFromUrl() || "desk"); // глубокая ссылка: /signals открывает Сигналы
       Store.start();
     }, 350);
   }
@@ -474,13 +554,6 @@ const App = (() => {
         break;
       }
 
-      // сброс памяти ИИ (обучение начнётся заново)
-      case "ai:brain-reset":
-        Store.resetBrain();
-        h.toast("info", "Память ИИ сброшена", "Веса факторов вернулись к базовым — обучение начнётся заново");
-        renderView();
-        break;
-
       // сигналы
       case "sig:take": {
         if (!Store.canTrade()) { h.toast("error", "Сделки может открывать только аккаунт David или Yura"); break; }
@@ -646,6 +719,12 @@ const App = (() => {
     Store.subscribe(scheduleRender);
     if (window.Live) Live.onChange(() => { scheduleRender(); });
     if (window.Binance) Binance.onSourceChange((id) => { Store.state.source = id; scheduleRender(); });
+    // живой PnL: патчер на каждом тике WebSocket + страховка раз в секунду
+    Store.onFastTick(patchPnl);
+    setInterval(patchPnl, 1000);
+    // кнопки «назад/вперёд» и смена hash открывают соответствующую вкладку
+    window.addEventListener("popstate", onUrlChange);
+    window.addEventListener("hashchange", () => { if (!hashNav) onUrlChange(); });
     if (Auth.readSession()) {
       afterLogin();
     } else {

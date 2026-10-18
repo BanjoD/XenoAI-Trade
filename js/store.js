@@ -56,6 +56,126 @@ const Store = (() => {
   }
   state.aiBrain = defaultBrain();
 
+  // ------- ГЛОБАЛЬНАЯ ПАМЯТЬ ИИ: одна на всех пользователей и все режимы -------
+  // Мозг живёт НЕ в аккаунте, а в общем хранилище устройства + синхронизируется с
+  // бесплатным анонимным облаком (textdb.online, без регистрации и ключей). Итог:
+  // один ИИ учится на каждой закрытой сделке каждого пользователя (David, Yura и все
+  // будущие) — что в демо, что в реальном режиме (общий анализ), память переживает
+  // перезагрузку, смену аккаунта и работает между устройствами.
+  const GLOBAL_BRAIN_KEY = "xenoai_global_brain_v1";
+  const BRAIN_CLOUD_KEY = "xenoai-global-brain-a7x42";
+  const BRAIN_READ_URL = "https://textdb.online/" + BRAIN_CLOUD_KEY;
+  const BRAIN_WRITE_URL = "https://textdb.online/update/?key=" + BRAIN_CLOUD_KEY + "&value=";
+
+  function normalizeBrain(b) {
+    const base = defaultBrain();
+    if (!b || typeof b !== "object" || b.v !== 1) return base;
+    const br = { ...base, ...b, v: 1 };
+    if (!br.rel || typeof br.rel !== "object") br.rel = {};
+    if (!Array.isArray(br.lessons)) br.lessons = [];
+    if (!br.symStats || typeof br.symStats !== "object") br.symStats = {};
+    if (!br.wFlags || typeof br.wFlags !== "object") br.wFlags = {};
+    if (!Number.isFinite(br.trades) || br.trades < 0) { br.trades = 0; br.wins = 0; br.losses = 0; }
+    if (!Number.isFinite(br.wins) || br.wins < 0) br.wins = 0;
+    if (!Number.isFinite(br.losses) || br.losses < 0) br.losses = 0;
+    if (!Number.isFinite(br.confThreshold)) br.confThreshold = 76;
+    br.confThreshold = Math.max(70, Math.min(88, Math.round(br.confThreshold)));
+    return br;
+  }
+
+  function loadGlobalBrain() {
+    try {
+      const raw = localStorage.getItem(GLOBAL_BRAIN_KEY);
+      if (raw) return normalizeBrain(JSON.parse(raw));
+    } catch (e) { /* noop */ }
+    return null;
+  }
+
+  // слияние двух мозгов (миграция старой локальной памяти, приход из облака):
+  // «умнее» тот, кто изучил больше сделок; недостающий опыт другого подтягиваем
+  function mergeBrains(a, b) {
+    if (!a || !a.trades) a = null;
+    if (!b || !b.trades) b = null;
+    if (!a && !b) return null;
+    if (!a) return normalizeBrain(b);
+    if (!b) return normalizeBrain(a);
+    const main = normalizeBrain(b.trades > a.trades ? b : a);
+    const other = b.trades > a.trades ? a : b;
+    for (const k in other.rel || {}) if (main.rel[k] == null) main.rel[k] = other.rel[k];
+    for (const sym in other.symStats || {}) {
+      const o = other.symStats[sym], m = main.symStats[sym];
+      if (o && (!m || o.n > m.n)) main.symStats[sym] = o;
+    }
+    const seen = new Set((main.lessons || []).map((l) => l.text));
+    (other.lessons || []).forEach((l) => { if (l && l.text && !seen.has(l.text)) main.lessons.push(l); });
+    main.lessons = main.lessons.sort((x, y) => (y.ts || 0) - (x.ts || 0)).slice(0, 24);
+    for (const k in other.wFlags || {}) if (!main.wFlags[k]) main.wFlags[k] = other.wFlags[k];
+    if (!main.weights && other.weights) main.weights = other.weights;
+    main.updatedAt = Math.max(main.updatedAt || 0, other.updatedAt || 0);
+    return main;
+  }
+
+  // --- облачная синхронизация памяти (textdb.online: бесплатно, анонимно, CORS ок) ---
+  const brainSync = { busy: false, pending: false, lastOkAt: 0, lastPushAt: 0, mode: "подключение…" };
+  function fetchT(url, ms) {
+    const ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const t = ctl ? setTimeout(() => ctl.abort(), ms || 7000) : null;
+    const p = fetch(url, ctl ? { signal: ctl.signal } : {});
+    return p.then((r) => { if (t) clearTimeout(t); return r; }, (e) => { if (t) clearTimeout(t); throw e; });
+  }
+  function saveGlobalBrainLocal() {
+    try { localStorage.setItem(GLOBAL_BRAIN_KEY, JSON.stringify(state.aiBrain)); } catch (e) { /* noop */ }
+  }
+  function brainPush() {
+    if (!state.started) return; // не пушим до старта платформы (и из тестов)
+    if (brainSync.busy) { brainSync.pending = true; return; }
+    brainSync.busy = true;
+    const body = encodeURIComponent(JSON.stringify(state.aiBrain));
+    fetchT(BRAIN_WRITE_URL + body, 9000)
+      .then((r) => { if (!r.ok) throw new Error("push " + r.status); return r.json().catch(() => ({})); })
+      .then(() => { brainSync.lastOkAt = Date.now(); brainSync.lastPushAt = Date.now(); brainSync.mode = "облако"; })
+      .catch(() => { brainSync.mode = brainSync.lastOkAt ? "облако" : "локально (нет сети)"; })
+      .then(() => { brainSync.busy = false; if (brainSync.pending) { brainSync.pending = false; setTimeout(brainPush, 2000); } });
+  }
+  let brainPushTimer = null;
+  function scheduleBrainPush() {
+    if (brainPushTimer || typeof setTimeout !== "function") return; // typeof — для vm-тестов
+    brainPushTimer = setTimeout(() => { brainPushTimer = null; brainPush(); }, 4000);
+  }
+  function brainPull() {
+    if (brainSync.busy) return;
+    brainSync.busy = true;
+    fetchT(BRAIN_READ_URL, 7000)
+      .then((r) => { if (!r.ok) throw new Error("pull " + r.status); return r.text(); })
+      .then((txt) => {
+        txt = (txt || "").trim();
+        if (txt) {
+          const remote = normalizeBrain(JSON.parse(txt));
+          const ahead = remote.trades > state.aiBrain.trades
+            || (remote.trades === state.aiBrain.trades && remote.updatedAt > state.aiBrain.updatedAt);
+          if (ahead) {
+            state.aiBrain = mergeBrains(state.aiBrain, remote) || state.aiBrain;
+            saveGlobalBrainLocal();
+            emit();
+          }
+        }
+        brainSync.lastOkAt = Date.now(); brainSync.mode = "облако";
+      })
+      .catch(() => { brainSync.mode = brainSync.lastOkAt ? "облако" : "локально (нет сети)"; })
+      .then(() => { brainSync.busy = false; });
+  }
+  function brainSyncInfo() {
+    return { mode: brainSync.mode, lastOkAt: brainSync.lastOkAt, lastPushAt: brainSync.lastPushAt, trades: state.aiBrain.trades };
+  }
+  let brainSyncInited = false;
+  function initBrainSync() {
+    if (brainSyncInited) return;
+    brainSyncInited = true;
+    brainPull();          // подтянуть память, накопленную другими устройствами/пользователями
+    scheduleBrainPush();  // и отдать свою (обе стороны сходятся по числу изученных сделок)
+    if (typeof setInterval === "function") setInterval(() => { if (state.started) brainPull(); }, 120000); // опрос каждые 2 мин
+  }
+
   WATCH_SYMS.forEach((sym, i) => {
     const p = DEFAULT_PRICES[sym] != null ? DEFAULT_PRICES[sym] : 1;
     state.prices[sym] = { sym, price: p, prev: p, chg24h: 0, high24: p * 1.01, low24: p * 0.99, vol24: 0, open24: p, spark: seedSpark(p, i), ts: 0 };
@@ -71,6 +191,10 @@ const Store = (() => {
 
   function subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); }
   function emit() { listeners.forEach((fn) => { try { fn(); } catch (e) { console.error(e); } }); }
+
+  // быстрые слушатели (тик цены без перерисовки): живой PnL, сайдбар
+  const fastTickListeners = new Set();
+  function onFastTick(fn) { fastTickListeners.add(fn); return () => fastTickListeners.delete(fn); }
 
   // ---------- персистентность ----------
   // Версия v3: чистый старт — все сделки и статистики обнулены.
@@ -106,7 +230,8 @@ const Store = (() => {
           labAccounts: s.labAccounts, labPositions: s.labPositions, labClosed: s.labClosed.slice(0, 300),
           events: s.events.slice(0, 60), autoTrade: s.autoTrade, equityHist: s.equityHist.slice(-300),
           mode: s.mode, aiAuto: s.aiAuto, liveOrders: s.liveOrders.slice(0, 50),
-          aiBrain: s.aiBrain, aiSession: s.aiSession, aiStop: s.aiStop, aiThreshold: s.aiThreshold,
+          aiSession: s.aiSession, aiStop: s.aiStop, aiThreshold: s.aiThreshold,
+          // aiBrain больше не здесь: память ИИ глобальная (GLOBAL_BRAIN_KEY + облако), одна на всех пользователей
         };
         localStorage.setItem(dataKey(), JSON.stringify(data));
       } catch (e) { /* noop */ }
@@ -114,9 +239,11 @@ const Store = (() => {
   }
   function hydrate() {
     wipeOldStorages();
+    // ГЛОБАЛЬНЫЙ мозг: единая память всех пользователей — не зависит от аккаунта
+    state.aiBrain = loadGlobalBrain() || defaultBrain();
     try {
       const raw = localStorage.getItem(dataKey());
-      if (!raw) { welcomeIfFresh(); return; }
+      if (!raw) { welcomeIfFresh(); initBrainSync(); return; }
       const d = JSON.parse(raw);
       if (typeof d.balance === "number") state.balance = d.balance;
       if (typeof d.startBalance === "number") state.startBalance = d.startBalance;
@@ -131,11 +258,13 @@ const Store = (() => {
       if (d.mode === "demo" || d.mode === "live") state.mode = d.mode;
       if (typeof d.aiAuto === "boolean") state.aiAuto = d.aiAuto;
       if (Array.isArray(d.liveOrders)) state.liveOrders = d.liveOrders;
-      if (d.aiBrain && typeof d.aiBrain === "object" && d.aiBrain.v === 1) {
-        state.aiBrain = { ...defaultBrain(), ...d.aiBrain };
-        if (!state.aiBrain.rel || typeof state.aiBrain.rel !== "object") state.aiBrain.rel = {};
-        if (!Array.isArray(state.aiBrain.lessons)) state.aiBrain.lessons = [];
-        if (!state.aiBrain.symStats || typeof state.aiBrain.symStats !== "object") state.aiBrain.symStats = {};
+      // старая локальная память ИИ (до глобальной) — одноразовая миграция в общий мозг
+      if (d.aiBrain && typeof d.aiBrain === "object") {
+        const legacy = normalizeBrain(d.aiBrain);
+        if (legacy.trades > state.aiBrain.trades) {
+          state.aiBrain = mergeBrains(state.aiBrain, legacy) || state.aiBrain;
+          saveGlobalBrainLocal();
+        }
       }
       if (d.aiSession && typeof d.aiSession.startEquity === "number") state.aiSession = d.aiSession;
       if (d.aiStop && (d.aiStop.reason === "profit" || d.aiStop.reason === "loss")) state.aiStop = d.aiStop;
@@ -143,6 +272,7 @@ const Store = (() => {
       // в реальном режиме после перезагрузки страницы соединение надо перепроверить
       if (state.mode === "live" && !(window.Live && Live.isConnected())) state.mode = "demo";
     } catch (e) { /* noop */ }
+    initBrainSync(); // тянет облако и запускает периодический опрос (один раз за загрузку страницы)
   }
   function switchUser() {
     const started = state.started;
@@ -191,6 +321,11 @@ const Store = (() => {
       tone: "neutral",
       title: "ИИ-сканер ищет лучшие идеи по рынку",
       detail: "автопилот вкл: сам заходит в монеты · скам- и новостная защита · авто-стоп сессии при ±50% (лимит настраивается)",
+    });
+    pushEvent({
+      tone: "neutral",
+      title: "Мозг ИИ — глобальный: одна память на всех",
+      detail: "ИИ учится на каждой закрытой сделке каждого пользователя (демо и реальный режим) · память синхронизируется между устройствами",
     });
   }
 
@@ -255,7 +390,7 @@ const Store = (() => {
     pushEvent({
       tone: p.side === "лонг" ? "bull" : "bear",
       title: p.strategy === "ai" ? `ИИ-сделка открыта: ${p.sym} ${p.side} ×${pos.lev}` : `Демо-сделка открыта: ${p.sym} ${p.side} ×${pos.lev}`,
-      detail: `${Fmt.fmtNum(margin)} ХРЮ по реальной цене ${price.toPrecision(6)}${p.ai ? ` · уверенность ИИ ${p.ai.confidence}%` : ""}`,
+      detail: `${Fmt.fmtNum(margin)} ХРЮ (≈ ${Fmt.fmtUsd(margin)}) по реальной цене ${price.toPrecision(6)}${p.ai ? ` · уверенность ИИ ${p.ai.confidence}%` : ""}`,
       sym: p.sym,
     });
     persist();
@@ -275,7 +410,7 @@ const Store = (() => {
     learnFromClosed(closed); // ИИ учится на результате
     pushEvent({
       tone: closed.pnl >= 0 ? "bull" : "bear",
-      title: `Демо-сделка закрыта: ${pos.sym} ${closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))} ХРЮ`,
+      title: `Демо-сделка закрыта: ${pos.sym} ${closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))} ХРЮ (≈ ${closed.pnl >= 0 ? "+" : "−"}$${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))})`,
       detail: closed.exitReason,
       sym: pos.sym,
     });
@@ -426,20 +561,22 @@ const Store = (() => {
     emit();
   }
 
-  // ------- обучение: память ИИ обновляется по каждой закрытой ИИ-сделке -------
+  // ------- обучение: ГЛОБАЛЬНАЯ память растёт на КАЖДОЙ закрытой сделке -------
+  // всех пользователей (David, Yura, будущие) во всех режимах: ИИ-сделки дают полную
+  // картину (факторы + опыт по монете + калибровка порога), остальные сделки — опыт по монете.
   function pushLesson(brain, text) {
     brain.lessons = [{ ts: Date.now(), text }, ...brain.lessons].slice(0, 24);
   }
 
   function learnFromClosed(c) {
-    if (!c || c.strategy !== "ai") return;
+    if (!c) return;
     const brain = state.aiBrain;
+    const isAi = c.strategy === "ai"; // у не-ИИ сделок нет снапшота факторов
     const won = c.pnl >= 0;
-    brain.trades++;
-    if (won) brain.wins++; else brain.losses++;
+    if (isAi) { brain.trades++; if (won) brain.wins++; else brain.losses++; }
 
-    // 1) надёжность факторов: кто был прав, а кто вёл в убыток
-    if (c.ai && Array.isArray(c.ai.factors) && c.ai.factors.length) {
+    // 1) надёжность факторов — по ИИ-сделкам (только у них есть снапшот факторов)
+    if (isAi && c.ai && Array.isArray(c.ai.factors) && c.ai.factors.length) {
       // итоговое направление рынка с точки зрения сделки: лонг×профит или шорт×убыток = вверх
       const sideSign = c.side === "лонг" ? 1 : -1;
       const outcomeSign = sideSign * (won ? 1 : -1);
@@ -471,7 +608,8 @@ const Store = (() => {
       }
     }
 
-    // 2) опыт по монете: серии убытков снижают уверенность на этой монете
+    // 2) опыт по монете — на ВСЕХ сделках (ИИ, сигнал, ручная) всех пользователей: любая закрытая
+    //    сделка что-то говорит о поведении монеты
     const st = brain.symStats[c.sym] || { n: 0, wins: 0, streak: 0, avgPct: 0 };
     st.n++;
     if (won) { st.wins++; st.streak = st.streak < 0 ? 1 : st.streak + 1; }
@@ -484,9 +622,9 @@ const Store = (() => {
       pushLesson(brain, `осторожнее с ${c.sym}: ${Math.abs(st.streak)} минуса подряд — уверенность на этой монете снижена`);
     }
 
-    // 3) калибровка порога входа: если сигналы чаще закрываются в минус — ИИ требует больше уверенности
+    // 3) калибровка порога входа — по ИИ-сделкам: если сигналы чаще закрываются в минус — ИИ требует больше уверенности
     const winrate = brain.wins / brain.trades;
-    if (brain.trades >= 6) {
+    if (isAi && brain.trades >= 6) {
       if (winrate < 0.45 && brain.confThreshold < 88) {
         brain.confThreshold++;
         pushLesson(brain, `поднял порог входа до ${brain.confThreshold}%: сигналы слишком часто закрывались в минус`);
@@ -496,13 +634,9 @@ const Store = (() => {
       }
     }
     brain.updatedAt = Date.now();
+    saveGlobalBrainLocal(); // глобальная память: сразу на устройство (общая для всех аккаунтов)
+    scheduleBrainPush();    // и в облако (debounce 4с) — чтобы все пользователи и устройства имели один мозг
     persist();
-  }
-
-  function resetBrain() {
-    state.aiBrain = defaultBrain();
-    pushEvent({ tone: "neutral", title: "Память ИИ сброшена", detail: "Веса факторов вернулись к базовым — обучение начнётся заново" });
-    persist(); emit();
   }
 
   // сдвиг уверенности по опыту монеты: серия минусов — осторожнее, серия плюсов — чуть смелее
@@ -531,7 +665,7 @@ const Store = (() => {
       pushEvent({
         tone: res.verdict === "лонг" ? "bull" : "bear",
         title: `ИИ-автопилот вошёл: ${res.sym} ${res.verdict} ${res.confidence}%`,
-        detail: `${Fmt.fmtNum(size)} ХРЮ · спот · защита: ${guardWhy} · стоп/цель по ATR`,
+        detail: `${Fmt.fmtNum(size)} ХРЮ (≈ ${Fmt.fmtUsd(size)}) · спот · защита: ${guardWhy} · стоп/цель по ATR`,
         sym: res.sym,
       });
     }
@@ -557,22 +691,36 @@ const Store = (() => {
     const thr = brain.confThreshold || 76;
     const effConf = res.confidence + symBias(sym); // уверенность с поправкой на опыт монеты
 
-    // флип: ИИ сам считает нужным развернуться (спот: продажа/выход в кэш)
-    if (aiPos && res.verdict !== "wait" && res.verdict !== aiPos.side && effConf >= Math.max(66, thr - 8)) {
-      const price = (state.prices[sym] && state.prices[sym].price) || aiPos.entry;
-      const closed = Engine.closeTrade(aiPos, price, "ИИ-флип");
-      state.userPositions = state.userPositions.filter((p) => p.id !== aiPos.id);
-      state.userClosed = [closed, ...state.userClosed].slice(0, 300);
-      state.balance += closed.size + closed.pnl;
-      learnFromClosed(closed);
-      pushEvent({
-        tone: res.verdict === "лонг" ? "bull" : "bear",
-        title: `ИИ флипнул ${sym}: ${aiPos.side} → ${res.verdict}`, detail: `закрыто по ${closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))} ХРЮ · разворот факторов`, sym,
-      });
-      const size = Math.min(1500, Math.max(200, Math.round(state.balance * 0.1)));
-      if (guard.ok && state.balance >= 300 && size >= 200) aiOpenInternal(res, size, true, guard.ok ? "ок" : guard.why);
-      persist();
-      return;
+    // флип: ИИ сам считает нужным развернуться (спот: продажа/выход в кэш).
+    // Флип — НЕ стоп-лосс: это реакция на разворот картины факторов, пока цена не дошла до стопа.
+    // Защита от дёрганья на шуме и пинг-понга (лонг→шорт→лонг):
+    //   1) позиция младше 15 минут не флипается, если её убыток не глубже −1.5%;
+    //   2) после флипа по монете — пауза 45 минут;
+    //   3) разворот требует уверенности не ниже max(72%, порог−4) вместо входного минимума.
+    if (aiPos && res.verdict !== "wait" && res.verdict !== aiPos.side) {
+      const ageMs = Date.now() - (aiPos.openedAt || 0);
+      const price0 = (state.prices[sym] && state.prices[sym].price) || aiPos.entry;
+      const floatPct = Engine.positionPnl(aiPos, price0).pct;
+      const flippedRecently = Boolean(state._flipAt && state._flipAt[sym] && Date.now() - state._flipAt[sym] < 45 * 60000);
+      const mayFlip = !flippedRecently
+        && effConf >= Math.max(72, thr - 4)
+        && (ageMs >= 15 * 60000 || floatPct <= -1.5);
+      if (mayFlip) {
+        const closed = Engine.closeTrade(aiPos, price0, "ИИ-флип");
+        state.userPositions = state.userPositions.filter((p) => p.id !== aiPos.id);
+        state.userClosed = [closed, ...state.userClosed].slice(0, 300);
+        state.balance += closed.size + closed.pnl;
+        learnFromClosed(closed);
+        state._flipAt = { ...(state._flipAt || {}), [sym]: Date.now() };
+        pushEvent({
+          tone: res.verdict === "лонг" ? "bull" : "bear",
+          title: `ИИ флипнул ${sym}: ${aiPos.side} → ${res.verdict}`, detail: `закрыто по ${closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))} ХРЮ (≈ ${closed.pnl >= 0 ? "+" : "−"}$${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))}) · разворот факторов (уверенность ${res.confidence}%)`, sym,
+        });
+        const size = Math.min(1500, Math.max(200, Math.round(state.balance * 0.1)));
+        if (guard.ok && state.balance >= 300 && size >= 200) aiOpenInternal(res, size, true, guard.ok ? "ок" : guard.why);
+        persist();
+        return;
+      }
     }
 
     // вход: уверенность ≥ обученного порога + защита прошла + лимит позиций + свободные ХРЮ
@@ -722,7 +870,7 @@ const Store = (() => {
       for (const e of exits) {
         pushEvent({
           tone: e.closed.pnl >= 0 ? "bull" : "bear",
-          title: `${e.pos.owner === "lab" ? "Лаборатория" : "Демо"}: ${e.pos.sym} закрыта ${e.closed.exitReason.toLowerCase()} · ${e.closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(e.closed.pnl)))} ХРЮ`,
+          title: `${e.pos.owner === "lab" ? "Лаборатория" : "Демо"}: ${e.pos.sym} закрыта ${e.closed.exitReason.toLowerCase()} · ${e.closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(e.closed.pnl)))} ХРЮ (≈ ${e.closed.pnl >= 0 ? "+" : "−"}$${Fmt.fmtNum(Math.abs(Math.round(e.closed.pnl)))})`,
           detail: `стратегия: ${(Engine.STRATEGIES.find((x) => x.id === e.pos.strategy) || { name: "вручную" }).name}`,
           sym: e.pos.sym,
         });
@@ -880,6 +1028,28 @@ const Store = (() => {
     pollTickers();
     setInterval(pollTickers, 4000);
 
+    // 1b) реальный поток цен (WebSocket Binance): тики каждую секунду между REST-опросами.
+    // Цены в состоянии обновляются мгновенно; слушатели fast-tick (живой PnL позиций,
+    // сайдбар) срабатывают без полной перерисовки. REST-опрос остаётся как резерв + источник spark.
+    if (Binance.openTickerStream && Binance.onFastTick) {
+      Binance.openTickerStream(WATCHLIST.map((i) => i.pair));
+      Binance.onFastTick((t) => {
+        const cur = state.prices[t.sym];
+        if (!cur) return;
+        state.prices[t.sym] = {
+          ...cur,
+          prev: cur.price,
+          price: t.price,
+          chg24h: t.chg24h,
+          high24: t.high24, low24: t.low24,
+          vol24: t.vol24 || cur.vol24,
+          open24: t.open24 || cur.open24,
+          ts: t.ts,
+        };
+        fastTickListeners.forEach((fn) => { try { fn(); } catch (e) { /* noop */ } });
+      });
+    }
+
     // 2) сбор свечей для движка: по одному инструменту каждые 1.8с
     let idx = 0;
     const pollBars = () => {
@@ -923,11 +1093,11 @@ const Store = (() => {
   }
 
   return {
-    state, subscribe, emit, start, getBars, ensureBars,
+    state, subscribe, emit, onFastTick, start, getBars, ensureBars,
     placeDemo, closeDemo, setBalance, resetDemo, toggleAuto,
     loadWhales, setActiveSym, totalEquity, switchUser, canTrade,
-    setMode, toggleAiAuto, recordLiveOrder, aiSessionInfo, resetBrain,
-    setAiThreshold, closeAllAiPositions,
+    setMode, toggleAiAuto, recordLiveOrder, aiSessionInfo,
+    setAiThreshold, closeAllAiPositions, brainSyncInfo,
   };
 })();
 

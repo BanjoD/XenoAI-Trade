@@ -204,7 +204,54 @@ const Binance = (() => {
 
   function binanceOk() { return Date.now() - lastOk < 30000 || sourceId !== null; }
 
-  return { fetchTickers, fetchTickerOne, fetchKlines, fetchAggTrades, binanceOk, sourceName, onSourceChange };
+  // ================= WebSocket-стрим цен: реальное время, ~1 тик в секунду =================
+  // Публичные потоки Binance без ключей (@miniTicker по каждой паре). Даёт мгновенные
+  // цены между REST-опросами: PnL позиций и цены обновляются каждую секунду, а не раз
+  // в 4с. Хост data-stream.binance.vision (зеркало рыночных данных), резерв — stream.binance.com.
+  // При обрыве — авто-реконнект с чередованием хостов; REST-опрос при этом продолжает работать.
+  const WS_HOSTS = ["wss://data-stream.binance.vision/stream", "wss://stream.binance.com:9443/stream"];
+  let ws = null, wsHostIdx = 0, wsPairs = [], wsListeners = new Set(), wsAlive = false, wsReconnectTimer = null;
+  function onFastTick(fn) { wsListeners.add(fn); return () => wsListeners.delete(fn); }
+  function wsEmit(t) { wsListeners.forEach((fn) => { try { fn(t); } catch (e) { /* noop */ } }); }
+  function wsConnected() { return wsAlive; }
+  function openTickerStream(pairs) {
+    if (typeof WebSocket === "undefined" || !pairs || !pairs.length) return;
+    if (ws && wsPairs.join() === pairs.join()) return; // уже открыт для этих пар
+    if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+    try { if (ws) { ws.onclose = null; try { ws.close(); } catch (e) {} ws = null; } } catch (e) {}
+    wsPairs = pairs.slice();
+    const url = WS_HOSTS[wsHostIdx % WS_HOSTS.length] + "?streams=" + wsPairs.map((p) => p.toLowerCase() + "@miniTicker").join("/");
+    try { ws = new WebSocket(url); } catch (e) { ws = null; return; }
+    ws.onopen = () => { wsAlive = true; };
+    ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        const d = msg && msg.data;
+        if (!d || d.e !== "24hrMiniTicker" || !d.s) return;
+        const c = Number(d.c), o = Number(d.o);
+        if (!(c > 0)) return;
+        wsEmit({
+          sym: d.s.replace(/USDT$/, ""),
+          price: c, open24: o,
+          chg24h: o > 0 ? (c / o - 1) * 100 : 0,
+          high24: Number(d.h) || c, low24: Number(d.l) || c,
+          vol24: Number(d.q) || 0,
+          ts: Date.now(),
+        });
+      } catch (e) { /* битый кадр — игнорируем */ }
+    };
+    ws.onclose = () => {
+      wsAlive = false;
+      ws = null;
+      wsHostIdx++; // в следующий раз пробуем другой хост
+      if (typeof setTimeout === "function" && !wsReconnectTimer) {
+        wsReconnectTimer = setTimeout(() => { wsReconnectTimer = null; openTickerStream(wsPairs); }, 5000);
+      }
+    };
+    ws.onerror = () => { try { if (ws) ws.close(); } catch (e) { /* noop */ } };
+  }
+
+  return { fetchTickers, fetchTickerOne, fetchKlines, fetchAggTrades, binanceOk, sourceName, onSourceChange, openTickerStream, onFastTick, wsConnected };
 })();
 
 window.Binance = Binance;
