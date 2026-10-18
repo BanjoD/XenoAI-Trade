@@ -710,6 +710,14 @@ const App = (() => {
       // сделки
       case "trades:tab": s._tradesTab = arg === "мои" ? "user" : "lab"; renderView(); break;
 
+      // свернуть/развернуть плашку позиций лаборатории (настройка устройства, localStorage)
+      case "trades:labfold": {
+        const cur = (() => { try { return localStorage.getItem("xenoai_lab_fold") === "1"; } catch (e) { return false; } })();
+        try { localStorage.setItem("xenoai_lab_fold", cur ? "0" : "1"); } catch (e) {}
+        renderView();
+        break;
+      }
+
       // экспорт истории сделок в CSV
       case "stats:export": {
         const rows = s.userClosed;

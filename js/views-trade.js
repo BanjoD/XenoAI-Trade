@@ -237,7 +237,7 @@ const ViewsTrade = (() => {
           <button class="limit-apply" data-action="ai:limit-apply" title="Применить свой лимит">OK</button>
         </span>
       </div>
-      <div class="ai-limit-note">Курс ХРЮ = $1: при базе ${Fmt.fmtUsd(sess ? sess.startBase || 0 : 0)} лимит ±${th}% — это ±${Fmt.fmtUsd(sess ? (sess.startBase || 0) * th / 100 : 0)} к результату сессии. При его достижении автопилот закроет все ИИ-сделки по рынку и выключится.</div>`;
+      <div class="ai-limit-note">Курс ХРЮ = $1: при базе ${Fmt.fmtUsd(sess ? sess.startBase || 0 : 0)} лимит ±${th}% — это ±${Fmt.fmtUsd(sess ? (sess.startBase || 0) * th / 100 : 0)} к результату сессии. При его достижении автопилот закроет все ИИ-сделки по рынку и выключится. Это аварийная граница ВСЕЙ сессии, а НЕ ширина стопа отдельной сделки: у каждой сделки свой стоп по волатильности (ATR) — лимит лишь останавливает автопилот целиком, когда суммарный результат сессии дойдёт до границы.</div>`;
 
     // ---- авто-стоп сработал: баннер с причиной и возобновлением ----
     let stopHtml = "";
@@ -545,7 +545,10 @@ const ViewsTrade = (() => {
 
   function trades() {
     const s = S();
-    const tab = s._tradesTab || "user";
+    // ЛАБА — только в демо-режиме: в реальном рынке лабораторных плашек, вкладок и входов нет
+    // (требование пользователя: реальному рынку лаборатория не нужна)
+    const showLab = s.mode !== "live";
+    const tab = showLab ? (s._tradesTab || "user") : "user";
     const closed = tab === "user" ? s.userClosed : s.labClosed;
 
     const userPosRows = s.userPositions.length === 0
@@ -617,7 +620,7 @@ const ViewsTrade = (() => {
     <div class="stack">
       <div>
         <h1 class="page-title">Сделки</h1>
-        <p class="page-sub">Демо-торговля хрювнами по реальным ценам · открытых: ${s.userPositions.length + s.labPositions.length}</p>
+        <p class="page-sub">Демо-торговля хрювнами по реальным ценам · открытых: ${s.userPositions.length + (showLab ? s.labPositions.length : 0)}</p>
       </div>
       ${myStatsBlock()}
       <div class="trades-grid">
@@ -627,16 +630,12 @@ const ViewsTrade = (() => {
             ${userPosRows}
           </section>
 
-          <section class="card">
-            <div style="padding:12px 20px;border-bottom:1px solid var(--border);font-size:13.5px;font-weight:500;color:#d4d4d8">Позиции лаборатории · ${s.labPositions.length}</div>
-            <div class="ai-limit-note" style="padding:10px 20px 0">Это не ваши сделки: лаборатория — 5 виртуальных счетов стратегий (по 10 000 ХРЮ каждый), которые торгуют сами для показа статистики. Их плюс/минус остаётся внутри тестовых счетов и не попадает в ваш баланс. Но они не бесполезны: каждая закрытая лабораторная сделка со своим снапшотом факторов обучает общий мозг ИИ — включите автоторговлю лаборатории в «Счетах», чтобы данные текли.</div>
-            ${labPosRows}
-          </section>
+          ${showLab ? labSection(s, labPosRows) : ""}
 
           <section class="card">
             <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;padding:12px 20px;border-bottom:1px solid var(--border)">
               <div style="display:flex;align-items:center;gap:8px">
-                ${h.tfBar(tab === "user" ? "мои" : "лаборатория", "trades:tab", ["мои", "лаборатория"])}
+                ${showLab ? h.tfBar(tab === "user" ? "мои" : "лаборатория", "trades:tab", ["мои", "лаборатория"]) : `<span style="font-size:13.5px;font-weight:500;color:#d4d4d8">Мои закрытые сделки</span>`}
                 <span class="num" style="font-size:12px;color:#71717a">· ${closed.length}</span>
               </div>
               <div style="display:flex;align-items:center;gap:10px">
@@ -654,6 +653,26 @@ const ViewsTrade = (() => {
       </div>
     </div>`;
     return { html, mount() {} };
+  }
+
+  // ================= лаборатория: сворачиваемая секция (только демо-режим) =================
+  // Плашка с позициями лабы перегружала экран (до 15+ строк) — теперь сворачивается
+  // в одну строку; выбор запоминается на устройстве (localStorage, без синка — это UI-настройка)
+  function labSection(s, labPosRows) {
+    let fold = false;
+    try { fold = localStorage.getItem("xenoai_lab_fold") === "1"; } catch (e) {}
+    const openN = s.labPositions.length;
+    const head = `<button data-action="trades:labfold" style="all:unset;display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;box-sizing:border-box;padding:12px 20px;border-bottom:1px solid var(--border);font-size:13.5px;font-weight:500;color:#d4d4d8;cursor:pointer" title="${fold ? "Развернуть" : "Свернуть"} плашку лаборатории">
+      <span>Позиции лаборатории · ${openN}</span>
+      <span style="font-size:11px;color:#71717a">${fold ? "развернуть ▾" : "свернуть ▴"}</span>
+    </button>`;
+    const note = `<div class="ai-limit-note" style="padding:10px 20px 0">Это не ваши сделки: лаборатория — 5 виртуальных счетов стратегий (по 10 000 ХРЮ каждый), которые торгуют сами для показа статистики. Их плюс/минус остаётся внутри тестовых счетов и не попадает в ваш баланс. Но они не бесполезны: каждая закрытая лабораторная сделка со своим снапшотом факторов обучает общий мозг ИИ — включите автоторговлю лаборатории в «Счетах», чтобы данные текли.</div>`;
+    return `<section class="card">
+      ${head}
+      ${fold
+        ? `<div class="ai-limit-note" style="padding:10px 20px">Свернуто: ${openN} ${openN === 1 ? "позиция обслуживается" : "позиций обслуживаются"} (стопы, цели, безубыток) — лента и статистика продолжат обновляться сами.</div>`
+        : note + labPosRows}
+    </section>`;
   }
 
   // ================= реальные ордера (заготовка) =================

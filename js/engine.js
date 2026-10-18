@@ -90,10 +90,12 @@ const Engine = (() => {
   function evalExit(pos, bars, price) {
     const dir = pos.side === "лонг" ? 1 : -1;
     if (dir * (price - pos.entry) >= dir * (pos.target - pos.entry)) return { reason: "Цель", price: pos.target };
-    // стоп с ГИСТЕРЕЗИСОМ для ИИ-позиций: срабатывает только на 0.06% ГЛУБЖЕ стопа —
-    // случайный фитиль/шум не выносит сделку раньше времени; сам минус при этом
-    // остаётся осмысленным (у ИИ стоп ≥ 0.5% от входа — уровень «супер-убытка»)
-    const slack = pos.strategy === "ai" ? pos.entry * 0.0006 : 0;
+    // стоп с ГИСТЕРЕЗИСОМ (для ВСЕХ позиций — ИИ, лаборатория, сигнал, ручная):
+    // срабатывает только на 0.06% ГЛУБЖЕ стопа — случайный фитиль/шум не выносит
+    // сделку раньше времени; у лаборатории раньше гистерезиса не было вовсе — любой
+    // фитиль выносил стратегическую сделку мгновенно (эпидемия стопов R27).
+    // Сам минус остаётся осмысленным (у ИИ стоп ≥ 0.5% от входа — уровень «супер-убытка»)
+    const slack = pos.entry * 0.0006;
     if (dir * (price - pos.entry) <= dir * (pos.stop - pos.entry) - slack) return { reason: "Стоп", price: pos.stop };
     // тренд-выход — СИММЕТРИЧНО для лонга и шорта (раньше был только лонг), но ТОЛЬКО
     // когда сделка в плюсе, покрывающем комиссию с запасом: растущий тренд сломался —
@@ -382,6 +384,34 @@ const Engine = (() => {
     };
   }
 
+  // ---- ВХОДНОЕ КАЧЕСТВО: отсекаем вход «в догонку» (эпидемия стопов R27) ----
+  // Симптом: ИИ и лаборатория покупали ВЕРХ импульсной свечи (факторы мопента
+  // голосуют «лонг» сразу после пампа) — первый же откат выбивал стоп через
+  // 7–13 минут, минусы шли каскадом по всему рынку. Причины: (1) последняя
+  // свеча — всплеск (аномально шире ATR): вход по её закрытию = покупка вершины;
+  // (2) цена экстремально оторвалась от EMA50: тренд «перегрет», средняя далеко.
+  // В обоих случаях вход откладываем до выдоха/отката — wait с честным объяснением.
+  function entryQuality(a, lastBar, side) {
+    if (!a || !lastBar) return { ok: false, why: "нет данных" };
+    const flash = a.atr > 0 ? (lastBar.h - lastBar.l) / a.atr : 0;
+    if (flash > 1.8) {
+      return { ok: false, why: `последняя свеча — всплеск ×${flash.toFixed(1)} к ATR: ждём выдох импульса, не догоняем памп` };
+    }
+    if (side === "лонг" && a.ema50Rel > 7) {
+      return { ok: false, why: `цена на +${a.ema50Rel.toFixed(1)}% оторвалась от EMA50 — вход в догонку, ждём откат` };
+    }
+    if (side === "шорт" && a.ema50Rel < -7) {
+      return { ok: false, why: `цена на −${Math.abs(a.ema50Rel).toFixed(1)}% оторвалась от EMA50 — шорт в догонку, ждём откат` };
+    }
+    return { ok: true, why: "ок" };
+  }
+  function entryQualityFromBars(bars, side) {
+    if (!bars || bars.length < 60) return { ok: false, why: "нет данных" };
+    const a = analyzeBars(bars);
+    if (!a) return { ok: false, why: "нет данных" };
+    return entryQuality(a, bars[bars.length - 1], side);
+  }
+
   function aiAnalyze(sym, bars, brain, newsItems, extra) {
     const ctx = buildAiContext(sym, bars, brain, newsItems, extra);
     if (!ctx) return null;
@@ -418,6 +448,16 @@ const Engine = (() => {
     const target = side === "лонг" ? price + risk * 2 : price - risk * 2;
     // уверенность: сила счёта + бонус за односторонность факторов − штраф за разноголосицу
     const confidence = Math.round(Math.max(50, Math.min(93, 54 + Math.abs(score) * 46 + (agreeShare - 0.5) * 24)));
+    // АНТИ-ДОГОН: всплеск/перегрев — вход откладывается (verdict wait с объяснением);
+    // автопилот, идеи и сигналы видят честную причину вместо слепого входа
+    const eq = entryQuality(a, bars[bars.length - 1], side);
+    if (!eq.ok) {
+      return {
+        sym, ts, verdict: "wait", confidence: Math.max(50, confidence - 12),
+        price, stop: 0, target: 0, riskPct: atrPct * 1.2, atrPct, flashRatio, factors, score, agreeShare,
+        note: eq.why,
+      };
+    }
     const top = [...factors].sort((x, y) => Math.abs(y.dir * y.weight) - Math.abs(x.dir * x.weight)).slice(0, 3);
     return {
       sym, ts, verdict: side, confidence, price, stop, target,
@@ -466,7 +506,7 @@ const Engine = (() => {
     }));
   }
 
-  return { STRATEGIES, analyzeBars, evalStrategy, evalExit, positionPnl, closeTrade, mkLabAccounts, aiAnalyze, aiFactorSnapshot, aiTrailStop, newsSentiment, AI_BASE_WEIGHTS, FEE_RATE };
+  return { STRATEGIES, analyzeBars, evalStrategy, evalExit, positionPnl, closeTrade, mkLabAccounts, aiAnalyze, aiFactorSnapshot, aiTrailStop, newsSentiment, AI_BASE_WEIGHTS, FEE_RATE, entryQuality, entryQualityFromBars };
 })();
 
 window.Engine = Engine;

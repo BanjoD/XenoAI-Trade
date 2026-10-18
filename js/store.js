@@ -1508,7 +1508,10 @@ const Store = (() => {
           notify: { kind: "ai_flip", data: { pnl: closed.pnl } },
         });
         const sc = aiSizeCalc();
-        if (guard.ok && rg.ok && sc.size > 0) aiOpenInternal(res, sc.size, true, "скам-фильтр, новости и риск-гвард ок");
+        if (guard.ok && rg.ok && sc.size > 0) {
+          aiOpenInternal(res, sc.size, true, "скам-фильтр, новости и риск-гвард ок");
+          state._aiLastEntryAt = Date.now();
+        }
         persist();
         return;
       }
@@ -1539,13 +1542,18 @@ const Store = (() => {
     }
     if (Date.now() < (state.aiCooldownUntil || 0)) return;
 
-    // вход: уверенность ≥ обученного порога + факторы односторонни + все гварды + лимиты позиций и сумм
+    // вход: уверенность ≥ обученного порога + факторы односторонни + все гварды + лимиты позиций и сумм.
+    // РАЗГОНКА ВХОДОВ: не чаще одного нового входа автопилота в 8 минут — иначе один общий
+    // импульс рынка набивал портфель одинаковыми лонгами, и один откат выбивал стопы
+    // ВСЕГО портфеля разом (каскад минусов R27: 12 лонгов стопом за вечер)
+    if (Date.now() - (state._aiLastEntryAt || 0) < 8 * 60000) return;
     if (!aiPos && res.verdict !== "wait" && effConf >= thr && (res.agreeShare == null || res.agreeShare >= 0.55) && aiCount < effMaxPos()) {
       if (!guard.ok || !rg.ok) return;
       if (!heatGuard().ok) return;
       const sc = aiSizeCalc();
       if (sc.size <= 0) return;
       aiOpenInternal(res, sc.size, true, "скам-фильтр, новости и риск-гвард ок");
+      state._aiLastEntryAt = Date.now();
       persist();
     }
   }
@@ -1653,8 +1661,15 @@ const Store = (() => {
       pushEvent({ tone: "bull", title: `${strat.name}: сигнал по ${sym} · ${sig.confidence}%`, detail: sig.note, sym, notify: { kind: "signal" } });
 
       // 2) автоторговля лаборатории — сделка стратегии получает снапшот факторов,
-      //    чтобы её закрытие обучило общий мозг ИИ (лаборатория — учебные данные)
+      //    чтобы её закрытие обучило общий мозг ИИ (лаборатория — учебные данные).
+      //    ЛАБА — ПОЛИГОН ДЕМО-РЕЖИМА: в реальном режиме новых лабораторных входов нет
+      //    (требование пользователя: реальному рынку лаборатория не нужна — там она
+      //    только мешала бы; существующие виртуальные позиции обслуживаются выходами),
+      //    а на вспышках вход откладывается тем же анти-догоном, что и у ИИ
       if (!state.autoTrade) continue;
+      if (state.mode === "live") continue;
+      const eq = Engine.entryQualityFromBars(bars, "лонг");
+      if (!eq.ok) continue;
       const acc = state.labAccounts.find((a) => a.strategy === strat.id);
       if (!acc || acc.balance < 500) continue;
       const size = Math.max(200, Math.min(1000, acc.balance * 0.1));
@@ -2155,7 +2170,7 @@ const Store = (() => {
     effAuto,
     // внутренности для юнит-тестов
     _flipAllowed: flipAllowed, _riskGuard: riskGuard, _heatGuard: heatGuard, _aiLossStreak: aiLossStreak,
-    _aiAutoStep: aiAutoStep, _diagInfo: () => ({ count: diagCount, foreign: foreignCount }),
+    _aiAutoStep: aiAutoStep, _engineStep: engineStep, _diagInfo: () => ({ count: diagCount, foreign: foreignCount }),
     _diagReset: () => { lastDiagAt = 0; diagSeen.clear(); diagCount = 0; foreignCount = 0; }, // только для юнит-тестов
     _mergeArchives: mergeArchives, _applyArchive: applyArchive, _fpOf: fpOf, _diagError: diagError,
     _trimForCloud: trimForCloud, _isVirginArchive: isVirginArchive,
