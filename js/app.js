@@ -117,6 +117,25 @@ const App = (() => {
     </button>`;
   }
 
+  // ---------- PWA: колокол уведомлений + кнопка полного экрана ----------
+  function notifOn() { return Boolean(window.Notify && Notify.getSettings().on && Notify.permission() === "granted"); }
+  function bellBtn(cls) {
+    const on = notifOn();
+    return `<button class="${cls}" data-action="notify:open" title="Уведомления: сделки ИИ, профит/минус, авто-стоп" aria-label="Уведомления" style="position:relative">${h.icon(on ? "bell" : "bellOff", 15)}${on ? '<i class="bell-dot"></i>' : ""}</button>`;
+  }
+  function fsBtn(cls) {
+    if (window.Notify && !Notify.fsSupported()) return ""; // iOS в браузере: полный экран только через установку PWA
+    const on = Boolean(window.Notify && Notify.fsElement());
+    return `<button class="${cls}" data-action="fs:toggle" title="Во весь экран (скрыть системные панели)" aria-label="Во весь экран"><span class="fs-icon">${h.icon(on ? "minimize" : "maximize", 15)}</span></button>`;
+  }
+  // обновить колокола в шапке/сайдбаре без полного ререндера (после вкл/выкл уведомлений)
+  function updateBellButtons() {
+    const on = notifOn();
+    document.querySelectorAll('[data-action="notify:open"]').forEach((b) => {
+      b.innerHTML = h.icon(on ? "bell" : "bellOff", 15) + (on ? '<i class="bell-dot"></i>' : "");
+    });
+  }
+
   function shellHtml() {
     const s = Store.state;
     const user = Auth.readSession();
@@ -187,7 +206,11 @@ const App = (() => {
             <div class="user-name">${user ? h.esc(user.login) : "—"}</div>
             <div class="user-role">Администратор</div>
           </div>
-          <button class="btn-logout" data-action="auth:logout" title="Выйти из аккаунта" aria-label="Выйти из аккаунта">${h.icon("logout", 15)}</button>
+          <div style="display:flex;align-items:center;gap:2px">
+            ${bellBtn("btn-logout")}
+            ${fsBtn("btn-logout")}
+            <button class="btn-logout" data-action="auth:logout" title="Выйти из аккаунта" aria-label="Выйти из аккаунта">${h.icon("logout", 15)}</button>
+          </div>
         </div>
         <a class="sb-link" href="https://t.me/Xeno_666" target="_blank" rel="noreferrer">${h.icon("send", 13)} По всем вопросам</a>
       </div>
@@ -199,6 +222,8 @@ const App = (() => {
         ${h.xenoLogo()}
         <div class="mh-right">
           <span class="mh-chip num" id="mh-balance">${Fmt.fmtNum(s.balance)} ХРЮ</span>
+          ${bellBtn("btn-menu")}
+          ${fsBtn("btn-menu")}
           <button class="btn-menu" data-action="menu:open" aria-label="Меню">${h.icon("menu", 18)}</button>
         </div>
       </div>
@@ -339,6 +364,12 @@ const App = (() => {
   // ---------- экран входа / сплэш ----------
   function renderAuth() {
     document.getElementById("root").innerHTML = Auth.authScreen();
+  }
+
+  // перерисовать открытую модалку настроек уведомлений после смены состояния
+  function refreshNotifyModal() {
+    const mr = document.getElementById("modal-root");
+    if (mr && mr.childElementCount) h.showModal(ViewsTrade.notifyModal(), {});
   }
 
   function afterLogin() {
@@ -639,6 +670,58 @@ const App = (() => {
         break;
       }
 
+      // ---------- PWA: системные уведомления + полный экран ----------
+      case "notify:open": h.showModal(ViewsTrade.notifyModal(), {}); break;
+      case "notify:master": {
+        if (!window.Notify) break;
+        if (Notify.getSettings().on) {
+          Notify.disable();
+          updateBellButtons();
+          h.toast("info", "Уведомления выключены", "Сделки ИИ по-прежнему видны в ленте событий");
+          refreshNotifyModal();
+          break;
+        }
+        Notify.enable().then((r) => {
+          updateBellButtons();
+          if (r.ok) h.toast("success", "Уведомления включены", "ИИ сообщит о сделках, профите/минусе и авто-стопе сессии");
+          else h.toast("error", "Уведомления не включены", r.why);
+          refreshNotifyModal();
+        });
+        break;
+      }
+      case "notify:ev":
+        Notify.setEvent(arg, !Notify.getSettings().events[arg]);
+        refreshNotifyModal();
+        break;
+      case "notify:opt":
+        Notify.set(arg, !Notify.getSettings()[arg]);
+        refreshNotifyModal();
+        break;
+      case "notify:minpnl":
+        Notify.setMinPnl(arg);
+        refreshNotifyModal();
+        break;
+      case "notify:minpnl-apply": {
+        const npEl = document.getElementById("notify-minpnl");
+        Notify.setMinPnl(npEl ? npEl.value : 0);
+        const mp = Notify.getSettings().minPnl;
+        h.toast("success", `Порог закрытий: ${mp === 0 ? "присылать все" : "только ≥ " + mp + " ХРЮ"}`, "Курс 1 ХРЮ = $1 — порог считается и в хрювнах, и в долларах");
+        refreshNotifyModal();
+        break;
+      }
+      case "notify:test": {
+        const tRes = Notify.test();
+        if (!tRes.ok) h.toast("error", "Пробное уведомление не отправлено", tRes.why);
+        break;
+      }
+      case "fs:toggle": {
+        if (!window.Notify) break;
+        const fsNow = await Notify.toggleFullscreen();
+        document.querySelectorAll(".fs-icon").forEach((b) => { b.innerHTML = h.icon(fsNow ? "minimize" : "maximize", 15); });
+        refreshNotifyModal();
+        break;
+      }
+
       // счета
       case "account:auto": Store.toggleAuto(); break;
 
@@ -696,6 +779,9 @@ const App = (() => {
       } else if (el.getAttribute && el.getAttribute("data-role") === "ai-limit") {
         const clean = el.value.replace(/[^\d]/g, "");
         if (clean !== el.value) el.value = clean;
+      } else if (el.getAttribute && el.getAttribute("data-role") === "notify-minpnl") {
+        const clean = el.value.replace(/[^\d]/g, "");
+        if (clean !== el.value) el.value = clean;
       }
     });
 
@@ -722,6 +808,18 @@ const App = (() => {
     // живой PnL: патчер на каждом тике WebSocket + страховка раз в секунду
     Store.onFastTick(patchPnl);
     setInterval(patchPnl, 1000);
+    // PWA: service worker — оффлайн-кэш + показ системных уведомлений (только https/localhost)
+    if ("serviceWorker" in navigator && (location.protocol === "https:" || ["localhost", "127.0.0.1"].indexOf(location.hostname) !== -1)) {
+      window.addEventListener("load", () => { navigator.serviceWorker.register("sw.js").catch(() => { /* file:// или без поддержки — не критично */ }); });
+    }
+    // PWA: иконка полного экрана меняется, когда пользователь выходит из него системной кнопкой
+    ["fullscreenchange", "webkitfullscreenchange"].forEach((evName) => {
+      document.addEventListener(evName, () => {
+        const fsOn = Boolean(window.Notify && Notify.fsElement());
+        document.querySelectorAll(".fs-icon").forEach((b) => { b.innerHTML = h.icon(fsOn ? "minimize" : "maximize", 15); });
+        refreshNotifyModal();
+      });
+    });
     // кнопки «назад/вперёд» и смена hash открывают соответствующую вкладку
     window.addEventListener("popstate", onUrlChange);
     window.addEventListener("hashchange", () => { if (!hashNav) onUrlChange(); });

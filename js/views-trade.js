@@ -886,7 +886,101 @@ const ViewsTrade = (() => {
     </div>`;
   }
 
-  return { market, trades, accounts, portfolio, tradeForm, cabinet, liveModal, liveOrdersCard, aiBlock };
+  // ================= УВЕДОМЛЕНИЯ (модалка настроек push + полный экран PWA) =================
+  function nrRow(action, id, label, desc, on) {
+    return `<button class="notify-row ${on ? "on" : ""}" data-action="${action}" data-arg="${id}" role="switch" aria-checked="${on ? "true" : "false"}">
+      <span class="nr-txt"><span class="nr-l">${h.esc(label)}</span><span class="nr-d">${h.esc(desc)}</span></span>
+      <span class="nr-sw"><i></i></span>
+    </button>`;
+  }
+
+  function notifyModal() {
+    if (!window.Notify) return "<div style=\"padding:20px\">Модуль уведомлений не загружен</div>";
+    const st = Notify.getSettings();
+    const perm = Notify.permission();
+    const iosFix = Notify.iosNeedsInstall();
+    const fsOn = Boolean(Notify.fsElement());
+    const canAsk = Notify.supported() && !iosFix;
+
+    const permBadge = {
+      granted: '<span class="np-ok">разрешение выдано</span>',
+      default: '<span class="np-warn">разрешение не запрошено</span>',
+      denied: '<span class="np-bad">разрешение заблокировано в браузере</span>',
+      unsupported: '<span class="np-bad">браузер не поддерживает уведомления</span>',
+    }[perm];
+
+    const master = !canAsk
+      ? `<div class="notify-master"><div class="nm-state"><b>Системные уведомления недоступны здесь.</b>${iosFix
+          ? " На iPhone/iPad сначала добавьте XenoAI Trade на экран «Домой» (кнопка «Поделиться» → «На экран Домой»), затем включите уведомления уже в установленном приложении — так требует iOS 16.4+."
+          : " Откройте платформу по https или localhost."}</div></div>`
+      : st.on
+        ? `<div class="notify-master">
+            <div class="nm-state"><b>Уведомления включены</b> · ${permBadge}</div>
+            <button class="btn-ghost" data-action="notify:master">Выключить</button>
+          </div>`
+      : perm === "denied"
+        ? `<div class="notify-master">
+            <div class="nm-state">${permBadge} — разрешите уведомления для этого сайта в настройках браузера (значок замка слева в адресной строке), затем нажмите «Повторить»</div>
+            <button class="btn-ghost" data-action="notify:master">Повторить</button>
+          </div>`
+        : `<div class="notify-master">
+            <div class="nm-state">Готово к включению · ${permBadge}</div>
+            <button class="btn-lime" data-action="notify:master">Включить уведомления</button>
+          </div>`;
+
+    const eventsHtml = Notify.EVENTS.map(([id, l, d]) => nrRow("notify:ev", id, l, d, st.events[id])).join("");
+
+    const minpnlPresets = [0, 10, 25, 50, 100];
+    const filterHtml = `
+      <div class="ai-limit-row">
+        <span class="lbl">${h.icon("swap", 12)} порог закрытий</span>
+        <div class="limit-chips">${minpnlPresets.map((v) => `<button class="limit-chip num ${st.minPnl === v ? "active" : ""}" data-action="notify:minpnl" data-arg="${v}">${v === 0 ? "все" : "≥ " + v}</button>`).join("")}</div>
+        <span class="custom-wrap">
+          <input id="notify-minpnl" class="inp num" data-role="notify-minpnl" inputmode="numeric" placeholder="0" value="${st.minPnl || ""}" title="Свой порог профита/минуса в ХРЮ">
+          <span class="pct">ХРЮ</span>
+          <button class="limit-apply" data-action="notify:minpnl-apply" title="Применить свой порог">OK</button>
+        </span>
+      </div>
+      <div class="ai-limit-note">Курс 1 ХРЮ = $1: порог 25 — присылать закрытия только с профитом или минусом от $25, более мелкие пропускать. Порог применяется к сделкам ИИ, вашим сделкам, флипам и авто-стопу сессии.</div>`;
+
+    const extraHtml = [
+      nrRow("notify:opt", "sound", "Звук", "системный звук уведомления", st.sound),
+      nrRow("notify:opt", "vibro", "Вибрация", "вибросигнал вместе с уведомлением (Android)", st.vibro),
+      nrRow("notify:opt", "quiet", "Тишина на экране", "не беспокоить, когда приложение открыто на переднем плане", st.quiet),
+    ].join("");
+
+    const actionsHtml = `
+      <div class="notify-actions">
+        <button class="btn-ghost" data-action="notify:test" ${st.on && perm === "granted" ? "" : "disabled"} title="Показать пробное системное уведомление">${h.icon("radio", 13)} Проверить уведомление</button>
+        ${Notify.fsSupported() ? `<button class="btn-ghost" data-action="fs:toggle"><span class="fs-icon">${h.icon(fsOn ? "minimize" : "maximize", 13)}</span> ${fsOn ? "Выйти из полного экрана" : "Во весь экран"}</button>` : ""}
+      </div>
+      <div class="notify-install">
+        <b>Установить как приложение:</b> Android · Chrome — меню ⋮ → «Установить приложение»; iPhone/iPad · Safari — «Поделиться» → «На экран Домой»; macOS · Safari — «Файл» → «Добавить в Dock», Chrome — значок установки в адресной строке. В установленном приложении XenoAI Trade открывается на весь экран — без адресной строки и системных панелей (на Android скрываются и статус-бар, и кнопки навигации).
+      </div>`;
+
+    return `
+    <div>
+      <div class="cab-head">
+        <span class="cab-icon" style="background:rgba(255,45,120,0.13)">${h.icon("bell", 22)}</span>
+        <div>
+          <h2 class="cab-title">Уведомления и приложение</h2>
+          <p class="cab-sub">push-оповещения о сделках ИИ · полный экран PWA</p>
+        </div>
+      </div>
+      <div class="cab-body">
+        ${master}
+        <div class="notify-sec">О чём присылать</div>
+        ${eventsHtml}
+        <div class="notify-sec">Фильтр мелких сделок</div>
+        ${filterHtml}
+        <div class="notify-sec">Режим доставки</div>
+        ${extraHtml}
+        ${actionsHtml}
+      </div>
+    </div>`;
+  }
+
+  return { market, trades, accounts, portfolio, tradeForm, cabinet, liveModal, liveOrdersCard, aiBlock, notifyModal };
 })();
 
 window.ViewsTrade = ViewsTrade;

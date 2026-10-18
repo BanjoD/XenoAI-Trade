@@ -301,8 +301,17 @@ const Store = (() => {
     return Boolean(login && TRADE_ACCOUNTS.indexOf(login.toLowerCase()) !== -1);
   }
 
+  // шина системных уведомлений: модуль Notify подписывается и показывает
+  // push-оповещения по событиям, помеченным notify: { kind } (см. js/notify.js)
+  const notifyBus = new Set();
+  function onNotify(fn) { notifyBus.add(fn); return () => notifyBus.delete(fn); }
+
   function pushEvent(e) {
     state.events = [{ ...e, id: `e${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, ts: Date.now() }, ...state.events].slice(0, 60);
+    if (e.notify && e.notify.kind && notifyBus.size) {
+      const data = Object.assign({ title: e.title, body: e.detail || "", sym: e.sym }, e.notify.data || {});
+      notifyBus.forEach((fn) => { try { fn(e.notify.kind, data); } catch (err) { /* noop */ } });
+    }
   }
 
   // первый запуск аккаунта: приветственная лента вместо пустого экрана
@@ -392,6 +401,8 @@ const Store = (() => {
       title: p.strategy === "ai" ? `ИИ-сделка открыта: ${p.sym} ${p.side} ×${pos.lev}` : `Демо-сделка открыта: ${p.sym} ${p.side} ×${pos.lev}`,
       detail: `${Fmt.fmtNum(margin)} ХРЮ (≈ ${Fmt.fmtUsd(margin)}) по реальной цене ${price.toPrecision(6)}${p.ai ? ` · уверенность ИИ ${p.ai.confidence}%` : ""}`,
       sym: p.sym,
+      // авто-вход оповещается отдельным событием «ИИ-автопилот вошёл» (см. aiOpenInternal)
+      notify: (p.strategy === "ai" && p.ai && p.ai.auto) ? null : { kind: p.strategy === "ai" ? "ai_open" : "user_open" },
     });
     persist();
     emit();
@@ -413,6 +424,7 @@ const Store = (() => {
       title: `Демо-сделка закрыта: ${pos.sym} ${closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))} ХРЮ (≈ ${closed.pnl >= 0 ? "+" : "−"}$${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))})`,
       detail: closed.exitReason,
       sym: pos.sym,
+      notify: { kind: "user_close", data: { pnl: closed.pnl } },
     });
     persist();
     emit();
@@ -453,7 +465,7 @@ const Store = (() => {
 
   function recordLiveOrder(order, note) {
     state.liveOrders = [{ ...order, note: note || "", ts: Date.now() }, ...state.liveOrders].slice(0, 50);
-    pushEvent({ tone: order.side === "лонг" ? "bull" : "bear", title: `Реальный ордер отправлен: ${order.sym} ${order.side === "лонг" ? "BUY" : "SELL"}`, detail: `${Fmt.fmtNum(Math.round(order.amountUSDT))} USDT · ${order.exchange}` });
+    pushEvent({ tone: order.side === "лонг" ? "bull" : "bear", title: `Реальный ордер отправлен: ${order.sym} ${order.side === "лонг" ? "BUY" : "SELL"}`, detail: `${Fmt.fmtNum(Math.round(order.amountUSDT))} USDT · ${order.exchange}`, notify: { kind: "live_order" } });
     persist(); emit();
   }
 
@@ -556,6 +568,7 @@ const Store = (() => {
         ? `ИИ наторговал ${Fmt.fmtNum(Math.round(info.pnl))} ХРЮ (≈ $${Fmt.fmtNum(Math.abs(Math.round(info.pnl)))}) профита`
         : `просадка ${Fmt.fmtNum(Math.round(Math.abs(info.pnl)))} ХРЮ (≈ $${Fmt.fmtNum(Math.abs(Math.round(info.pnl)))})`)
         + ` — автопилот закрыл все ИИ-сделки по рынку (${closedList.length} шт., итог ${sumPnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(sumPnl)))} ХРЮ) и ждёт возобновления работы`,
+      notify: { kind: "threshold", data: { pnl: info.pnl } },
     });
     persist();
     emit();
@@ -667,6 +680,7 @@ const Store = (() => {
         title: `ИИ-автопилот вошёл: ${res.sym} ${res.verdict} ${res.confidence}%`,
         detail: `${Fmt.fmtNum(size)} ХРЮ (≈ ${Fmt.fmtUsd(size)}) · спот · защита: ${guardWhy} · стоп/цель по ATR`,
         sym: res.sym,
+        notify: { kind: "ai_open" },
       });
     }
     return out;
@@ -715,6 +729,7 @@ const Store = (() => {
         pushEvent({
           tone: res.verdict === "лонг" ? "bull" : "bear",
           title: `ИИ флипнул ${sym}: ${aiPos.side} → ${res.verdict}`, detail: `закрыто по ${closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))} ХРЮ (≈ ${closed.pnl >= 0 ? "+" : "−"}$${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))}) · разворот факторов (уверенность ${res.confidence}%)`, sym,
+          notify: { kind: "ai_flip", data: { pnl: closed.pnl } },
         });
         const size = Math.min(1500, Math.max(200, Math.round(state.balance * 0.1)));
         if (guard.ok && state.balance >= 300 && size >= 200) aiOpenInternal(res, size, true, guard.ok ? "ок" : guard.why);
@@ -739,9 +754,9 @@ const Store = (() => {
       // возобновление работы: новая сессия с чистой базой и текущим лимитом
       state.aiSession = { startEquity: totalEquity(), openedAt: Date.now() };
       state.aiStop = null;
-      pushEvent({ tone: "neutral", title: "ИИ-автопилот включён: новая сессия", detail: `авто-стоп при +${aiLimitPct()}% профита или −${aiLimitPct()}% просадки (≈ $${Fmt.fmtNum(Math.round(state.aiSession.startEquity * aiLimitPct() / 100))} к базе) · база ${Fmt.fmtNum(Math.round(state.aiSession.startEquity))} ХРЮ` });
+      pushEvent({ tone: "neutral", title: "ИИ-автопилот включён: новая сессия", detail: `авто-стоп при +${aiLimitPct()}% профита или −${aiLimitPct()}% просадки (≈ $${Fmt.fmtNum(Math.round(state.aiSession.startEquity * aiLimitPct() / 100))} к базе) · база ${Fmt.fmtNum(Math.round(state.aiSession.startEquity))} ХРЮ`, notify: { kind: "autopilot", data: { on: true } } });
     } else {
-      pushEvent({ tone: "neutral", title: "ИИ-автопилот выключен", detail: "ИИ только сканирует и подсказывает" });
+      pushEvent({ tone: "neutral", title: "ИИ-автопилот выключен", detail: "ИИ только сканирует и подсказывает", notify: { kind: "autopilot", data: { on: false } } });
     }
     persist(); emit();
   }
@@ -819,7 +834,7 @@ const Store = (() => {
       if (state.labPositions.some((p) => p.sym === sym && p.strategy === strat.id)) continue;
       lastSignalKey = key;
       state.signals = [sig, ...state.signals.filter((x) => !(x.sym === sym && x.strategy === strat.id))].slice(0, 40);
-      pushEvent({ tone: "bull", title: `${strat.name}: сигнал по ${sym} · ${sig.confidence}%`, detail: sig.note, sym });
+      pushEvent({ tone: "bull", title: `${strat.name}: сигнал по ${sym} · ${sig.confidence}%`, detail: sig.note, sym, notify: { kind: "signal" } });
 
       // 2) автоторговля лаборатории
       if (!state.autoTrade) continue;
@@ -873,6 +888,9 @@ const Store = (() => {
           title: `${e.pos.owner === "lab" ? "Лаборатория" : "Демо"}: ${e.pos.sym} закрыта ${e.closed.exitReason.toLowerCase()} · ${e.closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(e.closed.pnl)))} ХРЮ (≈ ${e.closed.pnl >= 0 ? "+" : "−"}$${Fmt.fmtNum(Math.abs(Math.round(e.closed.pnl)))})`,
           detail: `стратегия: ${(Engine.STRATEGIES.find((x) => x.id === e.pos.strategy) || { name: "вручную" }).name}`,
           sym: e.pos.sym,
+          notify: e.pos.owner === "lab"
+            ? { kind: "lab", data: { pnl: e.closed.pnl } }
+            : { kind: e.pos.strategy === "ai" ? "ai_close" : "user_close", data: { pnl: e.closed.pnl } },
         });
       }
       persist();
@@ -1093,7 +1111,7 @@ const Store = (() => {
   }
 
   return {
-    state, subscribe, emit, onFastTick, start, getBars, ensureBars,
+    state, subscribe, emit, onFastTick, onNotify, start, getBars, ensureBars,
     placeDemo, closeDemo, setBalance, resetDemo, toggleAuto,
     loadWhales, setActiveSym, totalEquity, switchUser, canTrade,
     setMode, toggleAiAuto, recordLiveOrder, aiSessionInfo,
