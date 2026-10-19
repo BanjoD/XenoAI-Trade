@@ -1,12 +1,14 @@
 # XenoAI Backend — автоматический деплой торгового сервера на Cloudflare Workers.
 #
 # ЧТО ДЕЛАЕТ (полностью автоматически, после того как вы добавите ОДИН секрет):
-#   1. проверяет наличие секрета CLOUDFLARE_API_TOKEN (нет — тихо пропускает);
+#   1. проверяет наличие секрета CLOUDFLARE_API_TOKEN (нет — памятка в Summary);
 #   2. определяет account_id по токену;
-#   3. кладёт случайный ADMIN_TOKEN_SECRET в секреты воркера (одноразово);
-#   4. деплоит Worker + Durable Object (npx wrangler deploy);
+#   3. деплоит Worker + Durable Object (npx wrangler deploy; Node 22 — его
+#      требует современный wrangler);
+#   4. кладёт случайный ADMIN_TOKEN_SECRET в секреты воркера (одноразово,
+#      строго ПОСЛЕ деплоя — воркер уже точно существует);
 #   5. вытаскивает URL воркера и коммитит его в js/backend-config.js —
-#      платформа на GitHub Pages сразу начинает работать с сервером.
+#      Vercel пересобирает сайт, платформа сама подключается к серверу.
 #
 # НАСТРОЙКА (5 минут): см. BACKEND-SETUP.md в корне репозитория.
 
@@ -39,7 +41,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22   # современный wrangler требует >= 22
 
       - name: Проверка секрета
         id: guard
@@ -81,23 +83,6 @@ jobs:
           echo "ACCOUNT_ID=$ACC" >> "$GITHUB_ENV"
           echo "account_id: $ACC"
 
-      - name: Случайный ADMIN_TOKEN_SECRET (одноразово)
-        if: steps.guard.outputs.skip == 'false'
-        env:
-          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ACCOUNT_ID: ${{ env.ACCOUNT_ID }}
-        run: |
-          set -e
-          cd backend
-          npx --yes wrangler@latest secret list --name xenoai-trade-backend 2>/dev/null | tee /tmp/secrets.json || echo "[]" > /tmp/secrets.json
-          if ! grep -q "ADMIN_TOKEN_SECRET" /tmp/secrets.json; then
-            openssl rand -hex 32 > /tmp/token_secret.txt
-            npx --yes wrangler@latest secret put ADMIN_TOKEN_SECRET --name xenoai-trade-backend < /tmp/token_secret.txt
-            echo "ADMIN_TOKEN_SECRET создан (случайный, одноразовый)"
-          else
-            echo "ADMIN_TOKEN_SECRET уже существует — не трогаем (иначе все токены устройств истекут)"
-          fi
-
       - name: Деплой Worker + Durable Object
         if: steps.guard.outputs.skip == 'false'
         env:
@@ -119,6 +104,23 @@ jobs:
           fi
           echo "BACKEND_URL=$URL" >> "$GITHUB_ENV"
           echo "URL бэкенда: $URL"
+
+      - name: ADMIN_TOKEN_SECRET (одноразово, воркер уже создан)
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ env.ACCOUNT_ID }}
+        run: |
+          set -e
+          cd backend
+          npx --yes wrangler@latest secret list --name xenoai-trade-backend > /tmp/secrets.json 2>/dev/null || echo "[]" > /tmp/secrets.json
+          if ! grep -q "ADMIN_TOKEN_SECRET" /tmp/secrets.json; then
+            openssl rand -hex 32 > /tmp/token_secret.txt
+            npx --yes wrangler@latest secret put ADMIN_TOKEN_SECRET --name xenoai-trade-backend < /tmp/token_secret.txt
+            echo "ADMIN_TOKEN_SECRET создан (случайный, одноразовый)"
+          else
+            echo "ADMIN_TOKEN_SECRET уже существует — не трогаем (иначе все токены устройств истекут)"
+          fi
 
       - name: Проверка живости (/api/meta)
         if: steps.guard.outputs.skip == 'false'
@@ -154,7 +156,10 @@ jobs:
           else
             git add js/backend-config.js
             git commit -m "backend: URL сервера XenoAI записан деплой-воркфлоу [skip ci]"
-            git push
+            if ! git push; then
+              echo "::error::git push отклонён. Лечение: Settings → Actions → General → Workflow permissions → «Read and write permissions» → Save → заново Run workflow. Либо впишите URL вручную: откройте js/backend-config.js на GitHub (карандаш) и замените url: \"\" на url: \"$URL\"."
+              exit 1
+            fi
             echo "URL закоммичен — сайт (Vercel / GitHub Pages) пересоберётся автоматически"
           fi
           {
