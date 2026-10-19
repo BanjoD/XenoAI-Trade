@@ -157,7 +157,7 @@ const App = (() => {
     const live = s.mode === "live";
     const conn = window.Live ? Live.state.conn : null;
     const liveBal = window.Live ? Live.balanceUSDT() : null;
-    const sourceLabel = s.degraded ? "симуляция" : (s.source || "подключение…");
+    const sourceLabel = s.degraded ? "нет источника" : (s.source || "подключение…");
 
     const balanceCard = live
       ? `
@@ -210,7 +210,7 @@ const App = (() => {
         <div class="status-row">
           <div class="status-left">
             ${h.onlineDot()}
-            <span id="sb-status">${s.degraded ? "Демо-симуляция" : "Реальные данные"}</span>
+            <span id="sb-status">${s.degraded ? "Источники недоступны · торговля стоит" : "Реальные данные"}</span>
           </div>
           <span class="status-role">${user ? user.role : "admin"}</span>
         </div>
@@ -242,7 +242,7 @@ const App = (() => {
         </div>
       </div>
       <div class="desk-topline">
-        <span class="t" id="dt-status">${s.degraded ? "Рыночные источники недоступны — работает симуляция" : "Данные в реальном времени · " + sourceLabel + " · спот"}</span>
+        <span class="t" id="dt-status">${s.degraded ? "Рыночные источники недоступны — цены заморожены, торговля приостановлена" : "Данные в реальном времени · " + sourceLabel + " · спот"}</span>
         <span class="b num" id="dt-btc">BTC $${Fmt.fmtPrice(btc)}</span>
       </div>
     </header>`;
@@ -305,7 +305,7 @@ const App = (() => {
   function updateShell() {
     const s = Store.state;
     const btc = s.prices.BTC ? s.prices.BTC.price : 0;
-    const sourceLabel = s.degraded ? "симуляция" : (s.source || "подключение…");
+    const sourceLabel = s.degraded ? "нет источника" : (s.source || "подключение…");
     const set = (id, text, cls) => {
       const el = document.getElementById(id);
       if (!el) return;
@@ -319,9 +319,9 @@ const App = (() => {
     set("dt-btc", `BTC $${Fmt.fmtPrice(btc)}`);
     const live = document.getElementById("sb-live");
     if (live) { live.textContent = sourceLabel; live.className = s.degraded ? "live-deg" : "live-ok"; }
-    set("sb-status", s.degraded ? "Демо-симуляция" : "Реальные данные · " + sourceLabel);
+    set("sb-status", s.degraded ? "Источники недоступны · торговля стоит" : "Реальные данные · " + sourceLabel);
     const dt = document.getElementById("dt-status");
-    if (dt) dt.textContent = s.degraded ? "Рыночные источники недоступны — работает симуляция" : "Данные в реальном времени · " + sourceLabel + " · спот";
+    if (dt) dt.textContent = s.degraded ? "Рыночные источники недоступны — цены заморожены, торговля приостановлена" : "Данные в реальном времени · " + sourceLabel + " · спот";
     // бейджи
     document.querySelectorAll(".nav-item[data-action=nav]").forEach((b) => {
       const id = b.getAttribute("data-arg");
@@ -785,7 +785,10 @@ const App = (() => {
       }
 
       // ---------- PWA: системные уведомления + полный экран ----------
-      case "notify:open": h.showModal(ViewsTrade.notifyModal(), {}); break;
+      case "notify:open":
+        if (Notify.pushInfo) { Notify.pushInfo().catch(() => {}); }
+        setTimeout(() => h.showModal(ViewsTrade.notifyModal(), {}), Notify.pushInfo ? 350 : 0);
+        break;
       case "notify:master": {
         if (!window.Notify) break;
         if (Notify.getSettings().on) {
@@ -828,20 +831,26 @@ const App = (() => {
         if (!tRes.ok) h.toast("error", "Пробное уведомление не отправлено", tRes.why);
         break;
       }
-      case "notify:ntfy-copy": {
-        const topic = Notify.ntfyTopic();
-        if (!topic) { h.toast("error", "Темы ещё нет", "Включите синхронизацию устройств в Кабинете"); break; }
-        const doToast = () => h.toast("success", "Тема скопирована", topic + " — вставьте её в подписку приложения ntfy");
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(topic).then(doToast, () => h.toast("info", "Тема: " + topic, "Скопируйте вручную"));
-        } else h.toast("info", "Тема: " + topic, "Скопируйте вручную");
-        break;
-      }
-      case "notify:ntfy-test": {
-        h.toast("info", "Отправляю проверочный пуш…", "Он придёт на все устройства, подписанные на тему ntfy");
-        Notify.ntfyTest().then((r) => {
-          if (r.ok) h.toast("success", "Пуш отправлен в канал", "Если приложение ntfy подписано на тему — уведомление уже на телефоне");
-          else h.toast("error", "Пуш не прошёл", r.why || "проверьте сеть и имя темы");
+      case "notify:push-enable": {
+        if (!Notify.pushSupported || !Notify.pushSupported()) {
+          h.toast("error", "Пуши недоступны здесь", (Notify.pushSupportedStop && Notify.pushSupportedStop()) || "нужен https и поддержка Web Push");
+          break;
+        }
+        if (Notify.permission() !== "granted") {
+          // единственное действие пользователя — разрешение; подписка создаётся следом сама
+          Notify.enable().then((r) => {
+            updateBellButtons();
+            if (r.ok) h.toast("success", "Пуши включены", "Подписка устройства сохранена — Страж пришлёт пуш о сделке даже при закрытом приложении");
+            else h.toast("error", "Не удалось включить", r.why || "разрешение не выдано");
+            refreshNotifyModal();
+          });
+          break;
+        }
+        h.toast("info", "Подписываю устройство…", "Создаю подписку Web Push и сохраняю её в аккаунт для Стража");
+        Notify.ensureSubscription().then((r) => {
+          if (r.ok) h.toast("success", "Устройство подписано на пуши", "События сделок будут приходить даже при полностью закрытом приложении (Страж, каждые ~15 минут)");
+          else h.toast("error", "Подписка не создана", r.why || "попробуйте ещё раз");
+          refreshNotifyModal();
         });
         break;
       }

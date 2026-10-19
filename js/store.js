@@ -65,6 +65,7 @@ const Store = (() => {
     aiRelaxAt: 0,       // R28: когда порог входа последний раз снижался из-за простоя (не чаще раза в 4 часа)
     clearedU: [],       // «могилки» очищенной истории пользователя (id удалённых закрытых сделок) — чтобы облако не воскресило их
     clearedL: [],       // «могилки» очищенной истории лаборатории
+    pushSubs: [],       // R30: push-подписки устройств (Web Push) — Страж шлёт по ним пуши о сделках
     sync: { code: null, enabled: false, lastPush: 0, lastPull: 0, lastError: null, lastSeenRev: 0, sawRemote: false }, // синхронизация устройств
   };
 
@@ -350,6 +351,8 @@ const Store = (() => {
       aiBan: s.aiBan && typeof s.aiBan === "object" ? s.aiBan : {},
       aiLastEntryTs: s.aiLastEntryTs || 0, aiRelaxAt: s.aiRelaxAt || 0,
       clearedU: (s.clearedU || []).slice(-800), clearedL: (s.clearedL || []).slice(-800),
+      // R30: push-подписки устройств (Web Push) — по ним Страж шлёт пуши о сделках
+      pushSubs: (s.pushSubs || []).slice(0, 8),
       // идеи сканера сохраняются: после перезапуска вкладки «Сигналы» сразу полные,
       // а не ждут 45с, пока сканер обойдёт все монеты заново
       aiIdeas: s.aiIdeas.slice(0, 8).map((i) => ({
@@ -424,6 +427,12 @@ const Store = (() => {
     // могилки очищенной истории: удалённое не имеет права воскреснуть из старого архива
     if (Array.isArray(d.clearedU)) state.clearedU = d.clearedU.slice(-800);
     if (Array.isArray(d.clearedL)) state.clearedL = d.clearedL.slice(-800);
+    // R30: push-подписки из облака/бэкапа (union уже сделан в mergeArchives; здесь — валидация)
+    if (Array.isArray(d.pushSubs)) {
+      state.pushSubs = d.pushSubs
+        .filter((s) => s && typeof s.endpoint === "string" && s.endpoint.indexOf("https://") === 0 && s.keys && s.keys.p256dh && s.keys.auth)
+        .slice(0, 8);
+    }
     if (state.clearedU.length) {
       const tomb = new Set(state.clearedU);
       state.userClosed = (state.userClosed || []).filter((c) => !tomb.has(c.id));
@@ -473,6 +482,7 @@ const Store = (() => {
         pushEvent({ tone: "neutral", title: "Хранилище восстановлено из резервной копии", detail: "основная копия была повреждена — аккаунт поднят с зеркала, все сделки и история целы" });
       }
     } catch (e) { diagError("чтение хранилища", e); }
+    restorePriceSnapshot(); // R30: цены прошлого сеанса — до первого ответа источников
     initSyncRuntime(); // синхронизация устройств: метаданные + опрос облака
     initBrainSync(); // тянет облако и запускает периодический опрос (один раз за загрузку страницы)
   }
@@ -572,21 +582,108 @@ const Store = (() => {
   // часам (updatedAt). Нельзя сравнивать rev: это ЛОКАЛЬНЫЙ счётчик записей — у давно
   // используемого ПК он в тысячи раз больше, чем у свежего телефона, и «старый» ПК
   // перетирал бы актуальные позиции телефона (классический рассинхрон устройств)
+  // id исходной позиции из записи закрытия: новые записи несут pid, старые восстанавливаются
+  // из суффикса id (u1234-c5678 → u1234; догон: u<ts>-<sym>-c<ts> → u<ts>-<sym>)
+  function pidOfClosed(c) {
+    return (c && c.pid) || String((c && c.id) || "").replace(/-c\d+$/, "");
+  }
+
+  // R30: слияние ОТКРЫТЫХ ПОЗИЦИЙ по каждой сделке (union по id), а не «всё или ничего».
+  // Раньше список открытых позиций брался ЦЕЛИКОМ от устройства, которое менялось
+  // последним: пока телефон просто лежал открытым (персист эквити каждые 30 секунд
+  // двигал его updatedAt), он перетирал позиции ПК и наоборот — классический рассинхрон
+  // «на ПК одни позиции, на смартфоне другие». Теперь позиция, открытая на любом
+  // устройстве, переживает слияние; пропадает она только одним способом — закрытием
+  // (запись закрытия того же pid есть в объединённой истории).
+  function mergeOpenPositions(aPos, bPos, closedPids) {
+    const byId = new Map();
+    const put = (p) => {
+      if (!p || !p.id) return;
+      const cur = byId.get(p.id);
+      if (!cur || ((p.mt || 0) > (cur.mt || 0))) byId.set(p.id, p); // свежая правка (трейлинг и т.п.) важнее
+    };
+    (aPos || []).forEach(put);
+    (bPos || []).forEach(put);
+    const out = [];
+    for (const p of byId.values()) {
+      if (closedPids.has(p.id)) continue; // позиция закрыта (на любом устройстве) — открытой быть не может
+      out.push(p);
+    }
+    return out;
+  }
+
+  // объединение закрытых сделок по pid исходной позиции: двойное исполнение одного
+  // закрытия (браузер и Страж догоняли один период параллельно) даёт две записи с одним
+  // pid — зачёт результата проходит ОДИН раз (берём самое раннее закрытие = реальное)
+  function mergeClosed(listA, listB, cap) {
+    const byPid = new Map();
+    const add = (c) => {
+      if (!c || !c.id) return;
+      const pid = pidOfClosed(c);
+      if (!pid) return;
+      const cur = byPid.get(pid);
+      if (!cur || (c.closedAt || 0) < (cur.closedAt || 0)) byPid.set(pid, c);
+    };
+    (listA || []).forEach(add);
+    (listB || []).forEach(add);
+    return Array.from(byPid.values()).sort((x, y) => (y.closedAt || 0) - (x.closedAt || 0)).slice(0, cap);
+  }
+
+  // push-подписки устройств (Web Push): union по endpoint — подписка каждого устройства
+  // живёт в облаке, и Страж шлёт пуши на ВСЕ устройства аккаунта
+  function mergePushSubs(aSubs, bSubs) {
+    const byEp = new Map();
+    const add = (s) => {
+      if (!s || !s.endpoint || !s.keys || !s.keys.p256dh || !s.keys.auth) return;
+      const cur = byEp.get(s.endpoint);
+      if (!cur || ((s.ts || 0) > (cur.ts || 0))) byEp.set(s.endpoint, s);
+    };
+    (aSubs || []).forEach(add);
+    (bSubs || []).forEach(add);
+    return Array.from(byEp.values()).sort((x, y) => (y.ts || 0) - (x.ts || 0)).slice(0, 8);
+  }
+
   function mergeArchives(a, b) {
     if (!a || typeof a !== "object") return b;
     if (!b || typeof b !== "object") return a;
     const main = ((b.updatedAt || 0) > (a.updatedAt || 0)) ? b : a;
     const other = main === b ? a : b;
     const out = JSON.parse(JSON.stringify(main));
-    const seenC = new Set((out.userClosed || []).map((c) => c.id));
-    (other.userClosed || []).forEach((c) => { if (c && c.id && !seenC.has(c.id)) out.userClosed.push(c); });
-    out.userClosed = (out.userClosed || []).sort((x, y) => (y.closedAt || 0) - (x.closedAt || 0)).slice(0, 400);
-    const seenL = new Set((out.labClosed || []).map((c) => c.id));
-    (other.labClosed || []).forEach((c) => { if (c && c.id && !seenL.has(c.id)) out.labClosed.push(c); });
-    out.labClosed = (out.labClosed || []).sort((x, y) => (y.closedAt || 0) - (x.closedAt || 0)).slice(0, 400);
+
+    // --- закрытые сделки: union по pid, двойные исполнения схлопываются ---
+    out.userClosed = mergeClosed(a.userClosed, b.userClosed, 400);
+    out.labClosed = mergeClosed(a.labClosed, b.labClosed, 400);
+
+    // --- открытые позиции: union по id минус закрытые ---
+    const closedPids = new Set(out.userClosed.map(pidOfClosed).filter(Boolean));
+    out.userPositions = mergeOpenPositions(a.userPositions, b.userPositions, closedPids);
+    const labClosedPids = new Set(out.labClosed.map(pidOfClosed).filter(Boolean));
+    out.labPositions = mergeOpenPositions(a.labPositions, b.labPositions, labClosedPids);
+
+    // --- баланс согласован с объединённым набором позиций ---
+    // main.balance соответствует ИМЕННО позициям main. Правки:
+    //  1) позиция есть только у other (открыта на другом устройстве) — резервируем её маржу;
+    //  2) позиция была у main, но закрыта на other — зачисляем результат закрытия.
+    let bal = main.balance;
+    const mainOpenIds = new Set((main.userPositions || []).map((p) => p.id));
+    const outOpenIds = new Set(out.userPositions.map((p) => p.id));
+    for (const p of out.userPositions) {
+      if (!mainOpenIds.has(p.id)) bal -= (p.size || 0); // чужая открытая позиция: маржа уходит в рынок
+    }
+    for (const p of main.userPositions || []) {
+      if (outOpenIds.has(p.id)) continue;
+      const c = out.userClosed.find((x) => pidOfClosed(x) === p.id);
+      if (c) bal += (p.size || 0) + (c.pnl || 0); // закрыта на другом устройстве: маржа + результат
+    }
+    out.balance = bal;
+
     const seenE = new Set((out.events || []).map((e) => e.id));
     (other.events || []).forEach((e) => { if (e && e.id && !seenE.has(e.id)) out.events.push(e); });
     out.events = (out.events || []).sort((x, y) => (y.ts || 0) - (x.ts || 0)).slice(0, 80);
+
+    // push-подписки всех устройств
+    out.pushSubs = mergePushSubs(a.pushSubs, b.pushSubs);
+
     // могилки очистки истории объединяются с обеих сторон: удалённое на любом
     // устройстве не воскресает из архива другого устройства или облака
     out.clearedU = Array.from(new Set([...(a.clearedU || []), ...(b.clearedU || [])])).slice(-800);
@@ -699,12 +796,16 @@ const Store = (() => {
     const cu = a.clearedU || [], cl = a.clearedL || [];
     return [
       a.balance,
-      (a.userPositions || []).map((p) => p.id).sort().join(","),
+      // R30: не только id, но и содержимое позиций (стоп движется трейлингом) — иначе
+      // сдвиг стопа не уезжал бы в облако, пока не изменится состав позиций
+      (a.userPositions || []).map((p) => p.id + ":" + (p.stop || 0) + ":" + (p.mt || 0)).sort().join(","),
       (a.userClosed || []).length + ":" + (c0.id || ""),
       (a.events || []).length + ":" + (e0.id || ""),
       cu.length + ":" + (cu.length ? cu[cu.length - 1] : ""),
       cl.length + ":" + (cl.length ? cl[cl.length - 1] : ""),
       a.maxDeal, a.maxTotal, a.aiThreshold, a.aiPosMode,
+      a.failPct, // R30: провальный порог — Страж должен получить его как можно раньше
+      (a.pushSubs || []).length, // новая подписка устройства обязана уехать в облако
       a.mode, a.autoTrade ? 1 : 0, a.aiAuto ? 1 : 0, a.aiAutoLive ? 1 : 0,
     ].join("|");
   }
@@ -820,6 +921,7 @@ const Store = (() => {
         // в облако через sendBeacon (не зависит от выгрузки документа)
         window.addEventListener("pagehide", () => {
           try {
+            savePriceSnapshot(); // R30: цены последнего сеанса — на устройство
             const local = archiveAccount();
             if (state.sync.sawRemote && isVirginArchive(local)) return;
             const fp = fpOf(local);
@@ -852,6 +954,36 @@ const Store = (() => {
     const merged = mergeArchives(archiveAccount(), d); // слияние: ничего не теряем
     applySyncArchive(merged, "файловый бэкап");
     return { ok: true };
+  }
+
+  // ---------- R30: PUSH-ПОДПИСКИ УСТРОЙСТВ (нативный Web Push) ----------
+  // Разрешение на уведомления — единственное действие от пользователя. Подписка
+  // устройства (PushSubscription браузера) сохраняется в архив аккаунта и уезжает
+  // в облако синхронизации; Страж (GitHub Actions) читает подписки и шлёт пуши о
+  // сделках прямо в браузер/PWA — даже когда приложение полностью закрыто.
+  // Никаких сторонних приложений и ручных тем (ntfy убран — он требовал лишних шагов).
+  function addPushSub(sub) {
+    if (!sub || typeof sub.endpoint !== "string" || sub.endpoint.indexOf("https://") !== 0
+      || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) return { ok: false, error: "подписка неполная" };
+    const rest = (state.pushSubs || []).filter((s) => s.endpoint !== sub.endpoint);
+    rest.unshift({
+      endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth },
+      ts: Date.now(), ua: (typeof navigator !== "undefined" && navigator.userAgent || "").slice(0, 140),
+    });
+    state.pushSubs = rest.slice(0, 8);
+    pushEvent({
+      tone: "neutral",
+      title: "Push-подписка устройства сохранена",
+      detail: "Страж будет присылать на это устройство пуши о сделках ИИ даже при полностью закрытом приложении · разрешение на уведомления — единственное, что требуется",
+    });
+    persist(); emit();
+    return { ok: true };
+  }
+  function removePushSub(endpoint) {
+    if (!endpoint) return;
+    const before = (state.pushSubs || []).length;
+    state.pushSubs = (state.pushSubs || []).filter((s) => s.endpoint !== endpoint);
+    if (state.pushSubs.length !== before) persist();
   }
 
   // шина системных уведомлений: модуль Notify подписывается и показывает
@@ -962,6 +1094,52 @@ const Store = (() => {
     return rows.map((k) => ({ o: k.o, h: k.h, l: k.l, c: k.c, v: k.v, t: Math.floor(k.openTime / 60000) }));
   }
 
+  // ---------- R30: ПОСЛЕДНИЕ ИЗВЕСТНЫЕ ЦЕНЫ (переживают перезагрузку страницы) ----------
+  // Раньше при полной недоступности бирж цены каждый раз стартовали с зашитых дефолтов —
+  // PnL открытых позиций «воскресал» одним и тем же числом после каждого обновления
+  // (кейс R30: −0.10 и −0.18 ХРЮ при каждом F5). Теперь последний известный уровень
+  // сохраняется на устройстве и восстанавливается до первого опроса источников: без сети
+  // цены заморожены на честном последнем значении, а не сброшены к дефолтам.
+  const PRICE_SNAP_MAX = 200;
+  function priceSnapKey() { return dataKey() + "__prices"; }
+  function savePriceSnapshot() {
+    try {
+      const out = {};
+      for (const sym of WATCH_SYMS) {
+        const p = state.prices[sym];
+        if (p && p.ts > 0 && Number.isFinite(p.price) && p.price > 0) {
+          out[sym] = [p.price, p.chg24h || 0, p.high24 || p.price, p.low24 || p.price, p.vol24 || 0, p.open24 || p.price];
+        }
+      }
+      if (Object.keys(out).length) writeRawSafe(priceSnapKey(), JSON.stringify({ ts: Date.now(), p: out }));
+    } catch (e) { /* снапшот цен не критичен */ }
+  }
+  function restorePriceSnapshot() {
+    try {
+      const res = readRawSafe(priceSnapKey());
+      if (!res.raw) return false;
+      const d = JSON.parse(res.raw);
+      if (!d || !d.p || typeof d.p !== "object") return false;
+      const syms = Object.keys(d.p).slice(0, PRICE_SNAP_MAX);
+      let n = 0;
+      syms.forEach((sym, i) => {
+        const row = d.p[sym];
+        if (!Array.isArray(row) || !(Number(row[0]) > 0) || !state.prices[sym]) return;
+        const price = Number(row[0]);
+        state.prices[sym] = {
+          sym, price, prev: price,
+          chg24h: Number(row[1]) || 0,
+          high24: Number(row[2]) || price, low24: Number(row[3]) || price,
+          vol24: Number(row[4]) || 0, open24: Number(row[5]) || price,
+          spark: seedSpark(price, i),
+          ts: 0, // ts=0: данные «протухшие» — fillMissingTickers сразу докачает свежие
+        };
+        n++;
+      });
+      return n > 0;
+    } catch (e) { return false; }
+  }
+
   // ---------- действия ----------
   function setActiveSym(sym) {
     state.activeSym = sym;
@@ -986,11 +1164,10 @@ const Store = (() => {
         emit();
       })
       .catch(() => {
-        // деградация: синтетические свечи вокруг последней известной цены
+        // R30: биржа не ответила — для ГРАФИКА рисуем честно помеченные синтетические
+        // свечи (sim: true), но торговый движок по ним не работает (см. engineStep)
         const p = (state.prices[sym] && state.prices[sym].price) || DEFAULT_PRICES[sym] || 1;
-        const stepMin = (TF_MAP[tf] && TF_MAP[tf].stepMin) || 15;
-        const sim = Candles.genCandles({ seed: sym.length * 31 + sym.charCodeAt(0), n: 110, start: p * 0.985, end: p, stepMin, volBase: 0.008 });
-        state.bars[key] = sim;
+        state.bars[key] = genSimBars(sym, p);
         emit();
       });
   }
@@ -1763,6 +1940,13 @@ const Store = (() => {
   let lastSignalKey = "";
   function engineStep(sym, bars) {
     if (!bars || !bars.length) return;
+    // R30: ТОРГОВЛЯ ТОЛЬКО НА РЕАЛЬНЫХ ДАННЫХ. Пока источники цен недоступны (degraded)
+    // или перед нами помеченные синтетические свечи — движок НЕ торгует: ни входов ИИ и
+    // лаборатории, ни сигналов, ни стопов/целей. На фейковых ценах нельзя ни открывать
+    // сделки (мусор в портфеле — кейс R30), ни закрывать (фейковые стопы по реальным
+    // сделкам). Страж при этом продолжает обслуживать счёт: он работает на сервере
+    // GitHub с прямыми запросами к биржам и от браузера не зависит.
+    if (state.degraded || (bars[bars.length - 1] && bars[bars.length - 1].sim)) return;
     state.lastScanAt = Date.now(); // хартбит: сканер жив (виден в «Сигналах» и «Кабинете»)
     const price = (state.prices[sym] && state.prices[sym].price) || bars[bars.length - 1].c;
 
@@ -1820,6 +2004,7 @@ const Store = (() => {
         const newStop = Engine.aiTrailStop(p, price);
         if (newStop != null) {
           p.stop = newStop;
+          p.mt = Date.now(); // R30: метка правки позиции — слияние устройств берёт свежую версию стопа
           const dirIsLong = p.side === "лонг";
           const atBe = dirIsLong ? newStop >= p.entry : newStop <= p.entry;
           if (!p.beNotified && atBe) {
@@ -1891,49 +2076,39 @@ const Store = (() => {
     emit();
   }
 
-  // ---------- симуляция при недоступности Binance ----------
-  let simTimer = null;
-  function simTick() {
-    const rand = Math.random;
-    const now = Date.now();
-    for (const sym of WATCH_SYMS) {
-      const p = state.prices[sym];
-      const chg = (rand() - 0.5) * 0.0018;
-      const np = p.price * (1 + chg);
-      p.prev = p.price;
-      p.price = np;
-      p.chg24h = p.chg24h * 0.999 + (np / p.open24 - 1) * 100 * 0.001;
-      p.high24 = Math.max(p.high24, np);
-      p.low24 = Math.min(p.low24, np);
-      p.vol24 += Math.abs(chg) * np * 50000;
-      p.spark = [...p.spark.slice(1), np];
-      p.ts = now;
-    }
-    // двигаем последнюю свечу 15м каждого инструмента
-    for (const sym of WATCH_SYMS) {
-      const key = `${sym}:15м`;
-      const bars = state.bars[key];
-      const np = state.prices[sym].price;
-      if (bars && bars.length) {
-        const last = bars[bars.length - 1];
-        last.c = np;
-        last.h = Math.max(last.h, np);
-        last.l = Math.min(last.l, np);
-        last.v += Math.random() * 900;
-      } else {
-        const p0 = np;
-        state.bars[key] = Candles.genCandles({ seed: sym.length * 31 + sym.charCodeAt(0), n: 110, start: p0 * 0.985, end: p0, stepMin: 15, volBase: 0.008 });
-      }
-    }
-    // каждые ~25 тиков (~40с) прогоняем движок по одному инструменту
-    simCount++;
-    if (simCount % 25 === 0) {
-      const sym = WATCH_SYMS[simCount / 25 % WATCH_SYMS | 0];
-      engineStep(sym, state.bars[`${sym}:15м`]);
-    }
+  // ---------- R30: деградация БЕЗ симуляции торговли ----------
+  // Раньше при недоступности бирж запускался симулятор цен (случайное блуждание от
+  // дефолтов), и движок открывал/закрывал сделки на фейковых свечах — пользователь
+  // получал «позиции» с выдуманными входами и одинаковым PnL после каждого обновления.
+  // Теперь деградация честная: цены заморожены на последних известных уровнях,
+  // синтетические свечи (с меткой sim) рисуются только для графиков, торговля стоит.
+  function genSimBars(sym, p0) {
+    const bars = Candles.genCandles({ seed: sym.length * 31 + sym.charCodeAt(0), n: 110, start: p0 * 0.985, end: p0, stepMin: 15, volBase: 0.008 });
+    bars.forEach((b) => { b.sim = true; });
+    return bars;
+  }
+  let degradedAnnounced = false;
+  function announceDegraded() {
+    if (degradedAnnounced) return;
+    degradedAnnounced = true;
+    state.degraded = true;
+    pushEvent({
+      tone: "bear",
+      title: "Источники цен недоступны — торговля приостановлена",
+      detail: "ни одна биржа и агрегаторы не ответили (сеть или блокировка). Цены заморожены на последних известных уровнях · новые сделки ИИ, лаборатории и сигналы не открываются · стопы и цели не исполняются по фейковым ценам · как только источник ответит, торговля продолжится сама · Страж (если настроен) продолжает обслуживать счёт с сервера GitHub",
+    });
     emit();
   }
-  let simCount = 0;
+  function announceRestored() {
+    degradedAnnounced = false;
+    state.degraded = false;
+    pushEvent({
+      tone: "bull",
+      title: "Источник данных восстановлен: " + (Binance.sourceName() || "биржа"),
+      detail: "цены снова реальные — ИИ-автопилот, лаборатория и исполнение стопов/целей продолжены",
+    });
+    emit();
+  }
 
   // ---------- новости: бесплатная реальная лента (rss2json, без ключей) ----------
   function stripHtml(s) {
@@ -2080,7 +2255,7 @@ const Store = (() => {
       for (const pos of state.userPositions) {
         if (pos.sym !== sym || pos.strategy !== "ai" || !pos.ai) continue;
         const newStop = Engine.aiTrailStop(pos, bar.c);
-        if (newStop != null) pos.stop = newStop;
+        if (newStop != null) { pos.stop = newStop; pos.mt = ts; } // R30: метка правки для слияния устройств
       }
 
       // 3) выходы (стоп/цель — внутрисвечно, консервативно; тренд-сигнал — по закрытию,
@@ -2180,14 +2355,12 @@ const Store = (() => {
             ts: now,
           };
         }
-        state.degraded = false;
+        if (state.degraded) announceRestored(); // R30: честное «сеть вернулась»
         state.lastSync = now;
         state.source = Binance.sourceName();
-        if (simTimer) { clearInterval(simTimer); simTimer = null; }
         emit();
       } catch (e) {
-        state.degraded = true;
-        if (!simTimer) simTimer = setInterval(simTick, 1600);
+        announceDegraded(); // R30: без симуляции — торговля встаёт, цены заморожены
         emit();
       }
       // монеты, которых нет на текущем источнике (или цена протухла), докачиваем отдельно
@@ -2260,14 +2433,13 @@ const Store = (() => {
           engineStep(sym, bars);
         })
         .catch(() => {
-          // деградация: сим-свечи + шаг движка
-          const p = (state.prices[sym] && state.prices[sym].price) || DEFAULT_PRICES[sym] || 1;
+          // R30: биржа не ответила — свечи для графика (помеченные сим), движок НЕ шагает
           if (!state.bars[`${sym}:15м`]) {
-            state.bars[`${sym}:15м`] = Candles.genCandles({ seed: sym.length * 31 + sym.charCodeAt(0), n: 110, start: p * 0.985, end: p, stepMin: 15, volBase: 0.008 });
+            const p = (state.prices[sym] && state.prices[sym].price) || DEFAULT_PRICES[sym] || 1;
+            state.bars[`${sym}:15м`] = genSimBars(sym, p);
           }
-          state.degraded = true;
-          if (!simTimer) simTimer = setInterval(simTick, 1600);
-          engineStep(sym, state.bars[`${sym}:15м`]);
+          announceDegraded();
+          emit();
         });
     };
     pollBars();
@@ -2284,6 +2456,7 @@ const Store = (() => {
 
     setInterval(() => {
       state.equityHist = [...state.equityHist, { ts: Date.now(), v: totalEquity() }].slice(-300);
+      savePriceSnapshot(); // R30: последние известные цены переживают перезагрузку
       persist();
       emit();
     }, 30000);
@@ -2300,6 +2473,7 @@ const Store = (() => {
     openPositionsSum, autoMaxPos, effMaxPos, aiSizeCalc, aiKellyFrac,
     // жизнь без пользователя + синхронизация устройств
     catchUp, catchInfo: () => ({ lastCatchUp: state.lastCatchUp, lastRun: catchCtl.lastRun, busy: catchCtl.busy }),
+    addPushSub, removePushSub, // R30: push-подписки устройств (Web Push)
     enableSync, syncPush, syncPull, syncInfo, exportBackup, importBackup, archiveAccount,
     clearClosedHistory,
     effAuto,
@@ -2311,6 +2485,8 @@ const Store = (() => {
     _mergeArchives: mergeArchives, _applyArchive: applyArchive, _fpOf: fpOf, _diagError: diagError,
     _trimForCloud: trimForCloud, _isVirginArchive: isVirginArchive,
     _persist: persist,
+    _priceSave: savePriceSnapshot, _priceRestore: restorePriceSnapshot, // R30: для тестов
+    _genSimBars: genSimBars, _announceDegraded: announceDegraded, _announceRestored: announceRestored,
     _pairToSym: (p) => PAIR_TO_SYM[p] || null,
   };
 })();

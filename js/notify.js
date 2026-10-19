@@ -119,16 +119,16 @@ const Notify = (() => {
     if (!supported()) return Promise.resolve({ ok: false, why: "Этот браузер не поддерживает системные уведомления (или сайт открыт как файл, а не по https/localhost)" });
     if (iosNeedsInstall()) return Promise.resolve({ ok: false, why: "На iPhone/iPad добавьте XenoAI Trade на экран «Домой» (Поделиться → «На экран Домой») и включите уведомления уже в установленном приложении — так требует iOS 16.4+" });
     if (permission() === "denied") return Promise.resolve({ ok: false, why: "Разрешение заблокировано. Разрешите уведомления для этого сайта в настройках браузера (значок замка в адресной строке)" });
-    if (permission() === "granted") {
+    const after = () => {
       settings.on = true; persist();
       show("Уведомления включены", "XenoAI Trade сообщит о сделках ИИ, профите и авто-стопе", { tag: "system:on" });
-      return Promise.resolve({ ok: true });
-    }
+      // R30: подписка Web Push создаётся сразу — пуши от Стража придут и при закрытом приложении
+      return ensureSubscription().then((pr) => ({ ok: true, push: pr }));
+    };
+    if (permission() === "granted") return Promise.resolve().then(after);
     return requestPermission().then((p) => {
       if (p !== "granted") return { ok: false, why: "Разрешение не выдано — уведомления остались выключенными" };
-      settings.on = true; persist();
-      show("Уведомления включены", "XenoAI Trade сообщит о сделках ИИ, профите и авто-стопе", { tag: "system:on" });
-      return { ok: true };
+      return after();
     });
   }
   function disable() { settings.on = false; persist(); }
@@ -146,41 +146,92 @@ const Notify = (() => {
     return { ok: true };
   }
 
-  // ---------- push на смартфон через ntfy (канал, живущий при ЗАКРЫТОМ приложении) ----------
-  // Браузерные уведомления создаются страницей — когда Android/iOS выгрузил приложение из
-  // памяти, присылать некому (у статичного сайта нет своего push-сервера). Канал ntfy решает
-  // это без серверов: Страж (GitHub Actions) публикует события сделок в приватную тему
-  // xenoai-<код синхронизации>, телефон получает их как обычные push (приложение ntfy).
-  // Тема выводится из кода синхронизации — отдельный секрет заводить не нужно.
-  function ntfyTopic() {
+  // ---------- push на смартфон: НАТИВНЫЙ Web Push (без сторонних приложений) ----------
+  // Требование пользователя: «для пушей нужно лишь предоставить разрешение и всё, не
+  // должно быть никаких дополнительных действий». Так и сделано: разрешение → браузер
+  // сам создаёт PushSubscription (VAPID-ключ платформы) → подписка сохраняется в архив
+  // аккаунта и уезжает в облако синхронизации. Страж (GitHub Actions) читает подписки
+  // и шлёт пуши о сделках прямо в браузер/PWA — даже когда приложение полностью закрыто
+  // и выгружено из памяти. Никаких тем для копирования, сторонних программ и ручных шагов.
+  const VAPID_PUBLIC = "BEwaHaeQPCSGfyskYFUA4rvij2rNV2NDBo8Gq54cHKVvwHNNsOb6fzUWjW_UdUBBMpY_NxsvZ5fwylHYPIq2PtE";
+
+  function urlBase64ToUint8Array(b64) {
+    let s = String(b64).replace(/-/g, "+").replace(/_/g, "/");
+    while (s.length % 4) s += "=";
+    const raw = atob(s);
+    const out = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  }
+
+  function pushSupported() {
+    return Boolean(supported() && window.PushManager && navigator.serviceWorker);
+  }
+
+  // синхронный кэш состояния подписки — им рисуется модалка (обновляется при каждом
+  // асинхронном опросе/создании подписки: pushInfo/ensureSubscription)
+  let pushCache = { on: false, endpoint: null, why: "проверяю…" };
+  function getPushCache() { return pushCache; }
+
+  // текущее состояние подписки устройства: { on, endpoint, why }
+  async function pushInfo() {
+    const res = await pushInfoRaw();
+    pushCache = res;
+    return res;
+  }
+  async function pushInfoRaw() {
+    if (!pushSupported()) return { on: false, why: pushSupportedStop() };
     try {
-      const code = window.Store && Store.state && Store.state.sync && Store.state.sync.code;
-      const clean = String(code || "").toUpperCase().replace(/[^A-Z0-9_-]/g, "");
-      return clean ? "xenoai-" + clean : null;
-    } catch (e) { return null; }
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (!reg) return { on: false, why: "service worker ещё не готов" };
+      const sub = await reg.pushManager.getSubscription();
+      if (!sub) return { on: false, why: permission() === "granted" ? "подписка создаётся…" : "нужно разрешение на уведомления" };
+      return { on: true, endpoint: sub.endpoint };
+    } catch (e) { return { on: false, why: (e && e.message) || "ошибка подписки" }; }
   }
-  function ntfyPublish(title, body, tag) {
-    const topic = ntfyTopic();
-    if (!topic || typeof window.fetch !== "function") return Promise.resolve({ ok: false, why: "нет темы — код синхронизации ещё не создан" });
-    // JSON-публикация на корень ntfy; не-ASCII экранируется в \uXXXX — тело чисто ASCII
-    // (валидный JSON в любой точке маршрута), сервер декодирует обратно в кириллицу:
-    // UTF-8 в HTTP-заголовках запрещён, а «сырой» UTF-8 в JSON-теле часть маршрутов режет
-    const jsonSafe = (s) => String(s).replace(/[^\x20-\x7E]/g, (ch) => "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"));
-    const payload = jsonSafe(JSON.stringify({ topic, title: String(title || "XenoAI Trade"), message: String(body || ""), tags: [tag || "chart_with_yen_up"], priority: "default" }));
-    return fetch("https://ntfy.sh/", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: payload,
-    })
-      .then((r) => ({ ok: r.ok, status: r.status, why: r.ok ? null : "ntfy ответил " + r.status }))
-      .catch((e) => ({ ok: false, why: (e && e.message) || "сеть недоступна" }));
+
+  function pushSupportedStop() {
+    if (isIOS() && !isStandalone()) return "на iPhone/iPad сначала установите приложение на «Домой» (требование iOS 16.4+)";
+    if (!window.PushManager) return "браузер не поддерживает Web Push";
+    if (!supported()) return "браузер не поддерживает уведомления";
+    return "сайт должен быть открыт по https (или localhost)";
   }
-  function ntfyTest() {
-    return ntfyPublish(
-      "Проверка канала XenoAI",
-      "Если это пришло на смартфон — канал работает: Страж будет присылать сюда события сделок (входы, цели, провалы), даже когда приложение закрыто.",
-      "white_check_mark"
-    );
+
+  // создаёт (или возвращает существующую) подписку и сохраняет её в аккаунт для Стража
+  async function ensureSubscription() {
+    if (!pushSupported()) { pushCache = { on: false, endpoint: null, why: pushSupportedStop() }; return pushCache; }
+    if (permission() !== "granted") {
+      pushCache = { on: false, endpoint: null, why: "нужно разрешение на уведомления" };
+      return pushCache;
+    }
+    try {
+      const reg = await (navigator.serviceWorker.ready || navigator.serviceWorker.getRegistration());
+      if (!reg) return { ok: false, why: "service worker ещё не готов — откройте приложение ещё раз через пару секунд" };
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC),
+        });
+      }
+      const raw = sub.toJSON();
+      if (!raw || !raw.endpoint || !raw.keys || !raw.keys.p256dh || !raw.keys.auth) {
+        return { ok: false, why: "браузер вернул неполную подписку" };
+      }
+      if (window.Store && typeof Store.addPushSub === "function") {
+        const r = Store.addPushSub({ endpoint: raw.endpoint, keys: raw.keys });
+        if (!r.ok) return { ok: false, why: r.error || "подписка не сохранена" };
+      }
+      pushCache = { on: true, endpoint: raw.endpoint, why: "" };
+      return { ok: true, endpoint: raw.endpoint };
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      if (msg.indexOf("permission") !== -1 || msg.indexOf("denied") !== -1) {
+        return { ok: false, why: "разрешение не выдано — уведомления заблокированы в браузере" };
+      }
+      pushCache = { on: false, endpoint: null, why: msg };
+      return { ok: false, why: msg };
+    }
   }
 
   // ---------- полноэкранный режим ----------
@@ -207,13 +258,20 @@ const Notify = (() => {
     return Promise.resolve(exit).then(() => false).catch(() => false);
   }
 
-  function init() { hookStore(); }
+  function init() {
+    hookStore();
+    // R30: разрешение уже выдано ранее, а подписки нет (обновление страницы, сброс SW) —
+    // восстанавливаем её молча: пользователю не нужно ничего нажимать повторно
+    if (permission() === "granted" && pushSupported()) {
+      setTimeout(() => { ensureSubscription().catch(() => {}); }, 2500);
+    }
+  }
 
   return {
     init, EVENTS, getSettings() { return settings; },
     supported, permission, isIOS, isStandalone, iosNeedsInstall,
     enable, disable, setEvent, set, setMinPnl, test,
-    ntfyTopic, ntfyPublish, ntfyTest,
+    pushSupported, pushInfo, getPushCache, ensureSubscription, // R30: нативный Web Push
     fsElement, fsSupported, toggleFullscreen,
   };
 })();

@@ -79,9 +79,9 @@ const Views = (() => {
       <div class="page-head">
         <div>
           <h1 class="page-title">Деск</h1>
-          <p class="page-sub">Лаборатория стратегий на реальных ценах · ${s.degraded ? "симуляция (источники недоступны)" : "данные live · источник: " + (s.source || "подключение…")}</p>
+          <p class="page-sub">Лаборатория стратегий на реальных ценах · ${s.degraded ? "источники недоступны · цены заморожены, торговля стоит" : "данные live · источник: " + (s.source || "подключение…")}</p>
         </div>
-        <div class="live-pill hidden-sm">${h.onlineDot()} ${s.degraded ? "демо-симуляция" : (s.source || "live") + " · спот"}</div>
+        <div class="live-pill hidden-sm">${h.onlineDot()} ${s.degraded ? "оффлайн · цены заморожены" : (s.source || "live") + " · спот"}</div>
       </div>
 
       <div class="stat-grid cols4">

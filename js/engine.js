@@ -185,6 +185,7 @@ const Engine = (() => {
     const net = pnl - fee;
     return {
       id: `${pos.id}-c${Date.now()}`,
+      pid: pos.id, // R30: id исходной позиции — слияние устройств схлопывает двойные закрытия и не воскрешает закрытое
       owner: pos.owner, strategy: pos.strategy, account: pos.account,
       sym: pos.sym, side: pos.side, size: pos.size, lev: pos.lev,
       entry: pos.entry, exit: exitPrice, pnl: net,

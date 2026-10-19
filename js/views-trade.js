@@ -98,7 +98,7 @@ const ViewsTrade = (() => {
               <div style="display:flex;align-items:center;gap:8px">
                 <span style="font-size:16px;font-weight:600">${sym}</span>
                 ${h.tag("blue", inst ? inst.pair : sym)}
-                ${s.degraded ? h.tag("orange", "симуляция") : ""}
+                ${s.degraded ? h.tag("orange", "торговля стоит · цены заморожены") : ""}
               </div>
               <div class="mkt-sub num">за сутки <span class="${(p.chg24h || 0) >= 0 ? "text-green" : "text-red"}">${(p.chg24h || 0) >= 0 ? "+" : "−"}${Math.abs(p.chg24h || 0).toFixed(2)}%</span> · диапазон ${fmtPrice(p.low24 || 0)} — ${fmtPrice(p.high24 || 0)}</div>
             </div>
@@ -1140,23 +1140,26 @@ const ViewsTrade = (() => {
       nrRow("notify:opt", "quiet", "Тишина на экране", "не беспокоить, когда приложение открыто на переднем плане", st.quiet),
     ].join("");
 
-    // ---- push на смартфон через ntfy: канал, работающий при ЗАКРЫТОМ приложении ----
-    const ntfyTopic = Notify.ntfyTopic();
-    const ntfyHtml = `
+    // ---- push на смартфон: нативный Web Push (R30) — только разрешение, ничего больше ----
+    const pc = Notify.getPushCache ? Notify.getPushCache() : { on: false, why: "" };
+    const epTail = pc.endpoint ? String(pc.endpoint).slice(-14) : "";
+    const pushHtml = `
       <div class="notify-sec">Push на смартфон · даже при закрытом приложении</div>
       <div class="notify-install">
-        Браузерные уведомления приходят, пока приложение открыто или висит в фоне — когда Android/iOS выгружает его из памяти, присылать некому (у статичного сайта нет своего push-сервера). Канал <b>ntfy</b> решает это без своего сервера: <b>Страж (GitHub Actions, каждые 15 минут)</b> публикует события сделок — входы, цели, провалы, флипы, паузы — в вашу личную тему, и телефон получает их обычными push. Два шага: 1) установите приложение ntfy (Google Play / App Store) или откройте ntfy.sh в браузере и разрешите уведомления; 2) подпишитесь на приватную тему ниже. Готово — дальше всё идёт само.
+        Пуши приходят <b>нативным механизмом браузера</b> — никаких сторонних приложений и настроек. Достаточно один раз <b>разрешить уведомления</b> выше: устройство само подписывается на пуши платформы, подписка синхронизируется в облако аккаунта, и <b>Страж (каждые 15 минут)</b> присылает сюда события сделок — входы ИИ, цели, провалы, флипы, авто-стоп — даже когда приложение полностью закрыто и выгружено из памяти. Пока приложение открыто, уведомления приходят мгновенно.
       </div>
-      ${ntfyTopic
-        ? `<div class="ai-limit-row" style="flex-wrap:wrap;gap:8px">
-            <span class="lbl">${h.icon("radio", 12)} ваша тема</span>
-            <code class="num" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:6px 10px;font-size:12.5px">${h.esc(ntfyTopic)}</code>
-            <button class="btn-ghost" data-action="notify:ntfy-copy" title="Скопировать имя темы для подписки в ntfy">${h.icon("copy", 12)} копировать</button>
-            <a class="btn-ghost" href="https://ntfy.sh/${encodeURIComponent(ntfyTopic)}" target="_blank" rel="noopener" style="text-decoration:none">${h.icon("zap", 12)} открыть в ntfy</a>
-            <button class="btn-ghost" data-action="notify:ntfy-test" title="Отправить проверочное сообщение в тему — оно придёт на все подписанные устройства">${h.icon("bell", 12)} проверочный пуш</button>
-          </div>
-          <div class="ai-limit-note">Тема выведена из кода синхронизации аккаунта — отдельный секрет заводить не нужно. Пока приложение открыто, системные уведомления из блока выше продолжают приходить как раньше: ntfy — это второй, автономный канал для закрытого приложения.</div>`
-        : `<div class="ai-limit-note">Тема появится, когда у аккаунта будет код синхронизации (Кабинет → «Синхронизация устройств»).</div>`}`;
+      <div class="ai-limit-row" style="flex-wrap:wrap;gap:8px">
+        <span class="lbl">${h.icon("radio", 12)} это устройство</span>
+        ${pc.on
+          ? `<span class="np-ok">подписка активна · …${h.esc(epTail)}</span>`
+          : pc.why
+            ? `<span class="np-warn">${h.esc(pc.why)}</span>`
+            : `<span class="np-warn">подписка не создана</span>`}
+        ${pc.on
+          ? ""
+          : `<button class="btn-lime" data-action="notify:push-enable" title="Создать подписку Web Push для этого устройства">${h.icon("bell", 13)} Подписать на пуши</button>`}
+      </div>
+      <div class="ai-limit-note">После переустановки приложения или очистки данных браузера подписка обновится сама при первом запуске — нажимать ничего не нужно (кнопка здесь на случай, если что-то пошло не так).</div>`;
 
     const actionsHtml = `
       <div class="notify-actions">
@@ -1184,7 +1187,7 @@ const ViewsTrade = (() => {
         ${filterHtml}
         <div class="notify-sec">Режим доставки</div>
         ${extraHtml}
-        ${ntfyHtml}
+        ${pushHtml}
         ${actionsHtml}
       </div>
     </div>`;

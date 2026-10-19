@@ -8,6 +8,9 @@
 // 15-минутным свечам, исполнение задним числом) и сохраняет результат обратно в облако.
 // Итог: ИИ торгует, анализирует и закрывает сделки даже когда ВСЕ устройства выключены.
 //
+// ПУШИ: события прогона уходят нативным Web Push на подписанные устройства аккаунта
+// (tools/webpush.js, RFC 8291/8292, без npm-зависимостей).
+//
 // РЕЖИМЫ: страж обслуживает то состояние, которое лежит в облаке: демо-счёт в ХРЮ —
 // полностью; автопилот реального режима (aiAutoLive) — как и в браузере, симуляцией на
 // реальных ценах (реальные ордера всегда отправляет только человек, ключи биржи на
@@ -110,43 +113,38 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const recent = S.userClosed.slice(0, 5).map((c) => `  ${c.sym} ${c.side} ${c.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(c.pnl)))} ХРЮ (${c.exitReason})`);
   console.log(`Страж: догон рынка ${caught ? "выполнен" : "не потребовался"} · последних закрытий: ${recent.length ? "\n" + recent.join("\n") : "0"} · позиций в рынке: ${S.userPositions.length} · эквити ${Fmt.fmtNum(Math.round(Store.totalEquity()))} ХРЮ`);
 
-  // 4) PUSH НА СМАРТФОН (ntfy): события этого прогона улетают в приватную тему
-  //    xenoai-<код синхронизации> — телефон получает их как обычные push даже тогда,
-  //    когда PWA полностью закрыт и системные уведомления браузера не работают.
-  //    Тема выводится из кода синхронизации (он и так лежит в Secrets) — отдельный
-  //    секрет не нужен; сбой канала НЕ роняет прогон (торговля важнее уведомлений).
-  //    Публикация — JSON на корень ntfy; все не-ASCII символы экранируются в \uXXXX:
-  //    тело остаётся чистым ASCII (валидный JSON в любой точке маршрута), а сервер
-  //    декодирует его обратно в кириллицу — заголовки HTTP не принимают UTF-8, а
-  //    «сырой» UTF-8 в JSON-теле часть маршрутов режет (проверено: 400 invalid JSON).
-  const NTIFY_TAGS = { bull: "chart_with_upwards_trend", bear: "chart_with_downwards_trend", neutral: "robot" };
-  const jsonSafe = (s) => String(s).replace(/[^\x20-\x7E]/g, (ch) => "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"));
-  let ntfyOk = 0, ntfyFail = 0;
-  const freshEvents = (S.events || []).filter((e) => e && e.id && !evBefore.has(e.id)).slice(0, 20); // потолок 20: лимиты бесплатного ntfy.sh
-  if (freshEvents.length) {
-    const topic = "xenoai-" + String(CODE).toUpperCase().replace(/[^A-Z0-9_-]/g, "");
+  // 4) PUSH НА СМАРТФОН (нативный Web Push): события этого прогона уходят на ВСЕ
+  //    устройства аккаунта, чьи подписки лежат в архиве (pushSubs). Подписку устройство
+  //    создаёт само после разрешения уведомлений (нативный Push API, VAPID-ключ вшит в
+  //    платформу) и синхронизирует в облако — Стражу ничего дополнительно не нужно.
+  //    Мёртвые подписки (404/410 — приложение переустановили, endpoint сменился)
+  //    вычищаются из архива. Сбой канала НЕ роняет прогон: торговля важнее уведомлений.
+  let pushOk = 0, pushFail = 0;
+  const deadSubs = [];
+  const freshEvents = (S.events || []).filter((e) => e && e.id && !evBefore.has(e.id)).slice(0, 10); // потолок 10 за прогон
+  const subs = (S.pushSubs || []).filter((s) => s && s.endpoint && s.keys).slice(0, 8);
+  if (subs.length && freshEvents.length) {
+    const wp = require("./webpush.js"); // ноль npm-зависимостей: чистый Node crypto (RFC 8291/8292)
     for (const ev of freshEvents) {
-      try {
-        const body = jsonSafe(JSON.stringify({
-          topic,
-          title: String(ev.title || "XenoAI Trade").slice(0, 200),
-          message: String(ev.detail || "").slice(0, 500),
-          tags: [NTIFY_TAGS[ev.tone] || "robot"],
-          priority: ev.tone === "bear" ? "high" : "default",
-        }));
-        const ctl = new AbortController();
-        const to = setTimeout(() => ctl.abort(), 8000);
-        const res = await fetch("https://ntfy.sh/", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body,
-          signal: ctl.signal,
-        });
-        clearTimeout(to);
-        if (res.ok) ntfyOk++; else ntfyFail++;
-      } catch (e) { ntfyFail++; }
+      const payload = {
+        title: String(ev.title || "XenoAI Trade").slice(0, 120),
+        body: String(ev.detail || "").slice(0, 300),
+        tag: ev.tone === "bear" ? "xenoai-bear" : "xenoai",
+        url: "./",
+      };
+      for (const sub of subs) {
+        const r = await wp.sendPush(sub, payload, { urgency: ev.tone === "bear" ? "high" : "normal", ttl: 3600 });
+        if (r.ok) pushOk++;
+        else if (r.dead && !deadSubs.includes(sub.endpoint)) deadSubs.push(sub.endpoint);
+        else if (!r.ok) pushFail++;
+      }
+      await sleep(250); // push-сервисы не любят очереди мгновенных POST
     }
-    console.log(`Страж: push в ntfy (${topic}) — отправлено ${ntfyOk}, не доставлено ${ntfyFail}${ntfyFail ? " (канал не мешает торговле)" : ""}`);
+    console.log(`Страж: Web Push — доставлено ${pushOk}, сбоев ${pushFail}${deadSubs.length ? `, мёртвых подписок ${deadSubs.length}` : ""}`);
+  }
+  if (deadSubs.length) {
+    S.pushSubs = subs.filter((s) => !deadSubs.includes(s.endpoint));
+    console.log(`Страж: вычищено мёртвых push-подписок: ${deadSubs.length} (переустановленное приложение создаст новую при первом запуске)`);
   }
 
   // 5) сохранить результат в облако (архив + мозг, если учился)

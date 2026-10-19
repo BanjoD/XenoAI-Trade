@@ -4,7 +4,7 @@
    в симуляцию, но продолжает работать (кэш отдаёт оболочку приложения). */
 "use strict";
 
-const VERSION = "xenoai-v12";
+const VERSION = "xenoai-v13";
 const CORE = [
   "./",
   "./index.html",
@@ -112,7 +112,7 @@ self.addEventListener("notificationclick", (event) => {
   );
 });
 
-// настоящий push (на будущее: если появится сервер с VAPID-ключами, payload уже поддержан)
+// настоящий push: события от Стража (Web Push, RFC 8292) — приходят, когда приложение закрыто
 self.addEventListener("push", (event) => {
   let p = {};
   try { p = event.data ? event.data.json() : {}; } catch (e) { p = { title: event.data && event.data.text() }; }
