@@ -43,6 +43,8 @@ const Store = (() => {
     mode: "demo",       // demo | live (реальный рынок)
     aiAuto: true,       // ИИ-автопилот: сам заходит в монеты и флипает, спот-only
     aiIdeas: [],        // сканер ИИ: лучшие идеи по всем монетам
+    // R43 «Теневая торговля»: журнал отказов ИИ и их проверка временем (по мотивам поста Sova)
+    shadow: { list: [], stats: { right: 0, wrong: 0, flat: 0, avoidedSum: 0, avoidedN: 0, since: 0 } },
     liveOrders: [],     // отправленные реальные ордера (заготовка реальной торговли)
     aiBrain: null,      // память ИИ: адаптивные веса, статистика монет, уроки (обучение на сделках)
     aiSession: null,    // сессия автопилота: { startEquity, openedAt } — база для авто-стопа ±лимит
@@ -369,6 +371,8 @@ const Store = (() => {
         } : null,
       })),
       // aiBrain здесь нет: память ИИ глобальная (GLOBAL_BRAIN_KEY + облако), одна на всех
+      // R43: теневая торговля — журнал отказов и статистика едут с архивом
+      shadow: s.shadow && Array.isArray(s.shadow.list) ? { list: s.shadow.list.slice(0, 60), stats: s.shadow.stats || {} } : { list: [], stats: {} },
     };
   }
 
@@ -463,6 +467,13 @@ const Store = (() => {
     if (Array.isArray(d.aiIdeas)) {
       state.aiIdeas = d.aiIdeas.filter((i) => i && i.sym && i.res && typeof i.res.verdict === "string" && typeof i.res.confidence === "number")
         .slice(0, 8);
+    }
+    // R43: теневая торговля (журнал отказов ИИ) — с валидацией структуры
+    if (d.shadow && Array.isArray(d.shadow.list)) {
+      state.shadow = {
+        list: d.shadow.list.filter((e) => e && typeof e.id === "string" && e.sym && (e.side === "лонг" || e.side === "шорт") && typeof e.price === "number").slice(0, 60),
+        stats: d.shadow.stats && typeof d.shadow.stats === "object" ? d.shadow.stats : {},
+      };
     }
     if (typeof d.rev === "number" && d.rev > (state.rev || 0)) state.rev = d.rev;
     // время последнего изменения берём из архива (настенные часы для слияния устройств):
@@ -714,6 +725,20 @@ const Store = (() => {
 
     // push-подписки всех устройств
     out.pushSubs = mergePushSubs(a.pushSubs, b.pushSubs);
+
+    // R43: теневая торговля — union записей по id, счётчики по максимуму (они монотонные)
+    {
+      const byId = new Map();
+      for (const e of [...((b.shadow && b.shadow.list) || []), ...((a.shadow && a.shadow.list) || [])]) {
+        if (e && e.id && !byId.has(e.id)) byId.set(e.id, e);
+      }
+      const stA = (a.shadow && a.shadow.stats) || {}, stB = (b.shadow && b.shadow.stats) || {};
+      const stats = {};
+      for (const k of ["right", "wrong", "flat", "avoidedSum", "avoidedN"]) stats[k] = Math.max(Number(stA[k]) || 0, Number(stB[k]) || 0);
+      const sA = Number(stA.since) || 9e15, sB = Number(stB.since) || 9e15;
+      stats.since = Math.min(sA, sB) >= 9e15 ? Date.now() : Math.min(sA, sB);
+      out.shadow = { list: Array.from(byId.values()).sort((x, y) => (y.ts || 0) - (x.ts || 0)).slice(0, 60), stats };
+    }
 
     // R31: аренда исполнителя — действует аренда с БОЛЕЕ ПОЗДНИМ сроком (кто последний
     // продлил, тот и жив); просроченная ни на что не влияет (hostActive проверяет until)

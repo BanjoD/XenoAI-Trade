@@ -131,6 +131,11 @@ export default {
         const r = await roomFetch(env, login, "/bootstrap", { method: "POST", body, headers: { "Content-Type": "application/json" } });
         return jsonCors(await r.json(), r.status);
       }
+      // R42: тестовый пуш с сервера по подпискам аккаунта (диагностика доставки)
+      if (path === "/api/push-test" && req.method === "POST") {
+        const r = await roomFetch(env, login, "/pushtest", { method: "POST" });
+        return jsonCors(await r.json(), r.status);
+      }
 
       return jsonCors({ ok: false, error: "неизвестный маршрут: " + path }, 404);
     } catch (e) {

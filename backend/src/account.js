@@ -163,6 +163,48 @@ export function mergePushSubs(aSubs, bSubs) {
   return Array.from(byEp.values()).sort((x, y) => (y.ts || 0) - (x.ts || 0)).slice(0, 8);
 }
 
+// R43: «ТЕНЕВАЯ ТОРГОВЛЯ» (по мотивам поста Sova/Таповича t.me/tapovich_gram/7512):
+// журнал отказов ИИ — кандидат был, вход не состоялся (порог/фильтр/лимит/пауза).
+// Через горизонт часов каждый отказ проверяется по факту: отказ ПРАВИЛЬНЫЙ (монета
+// пошла бы в минус) или ПРОПУСТИЛИ профит. Тапович: 49 из 50 отказов верны —
+// после отказа монеты упали на 10–30%. Теперь наша платформа считает то же самое.
+export const SHADOW_HORIZON_MS = 8 * 3600e3; // горизонт оценки отказа — 8 часов
+const SHADOW_MAX = 60;                       // сколько записей храним в архиве
+const SHADOW_GAP_MS = 3 * 3600e3;            // антидубль: одна запись sym+side раз в 3 часа
+const SHADOW_DEADZONE = 1.0;                 // |движение| < 1% за горизонт — «мимо кассы»
+// Медвежий режим (тот самый «фильтр, который зарубил почти всё»): BTC −3% за 24ч
+// или ≥70% вотчлиста в красе → порог входа +6 — в падении торгуем только отборное.
+const BEAR_GATE = { btc24h: -3, breadth: 0.7, bump: 6 };
+
+function defaultShadow() {
+  return { list: [], stats: { right: 0, wrong: 0, flat: 0, avoidedSum: 0, avoidedN: 0, since: Date.now() } };
+}
+
+function normalizeShadow(s) {
+  const out = defaultShadow();
+  if (!s || typeof s !== "object") return out;
+  if (s.stats && typeof s.stats === "object") {
+    for (const k of ["right", "wrong", "flat", "avoidedSum", "avoidedN"]) {
+      const v = Number(s.stats[k]); if (Number.isFinite(v) && v >= 0) out.stats[k] = v;
+    }
+    if (Number(s.stats.since) > 0) out.stats.since = Number(s.stats.since);
+  }
+  if (Array.isArray(s.list)) {
+    out.list = s.list.filter((e) => e && typeof e.id === "string" && e.sym && (e.side === "лонг" || e.side === "шорт")
+      && typeof e.price === "number" && e.price > 0 && typeof e.ts === "number")
+      .slice(0, SHADOW_MAX).map((e) => ({
+        id: String(e.id).slice(0, 24), ts: e.ts, sym: String(e.sym).slice(0, 12), side: e.side,
+        price: e.price, conf: Number(e.conf) || 0, whyCode: String(e.whyCode || "").slice(0, 16),
+        why: String(e.why || "").slice(0, 160),
+        evalTs: Number(e.evalTs) || null, hypPct: Number.isFinite(Number(e.hypPct)) ? Number(e.hypPct) : null,
+        minPct: Number.isFinite(Number(e.minPct)) ? Number(e.minPct) : null,
+        maxPct: Number.isFinite(Number(e.maxPct)) ? Number(e.maxPct) : null,
+        verdict: e.verdict === "right" || e.verdict === "wrong" || e.verdict === "flat" ? e.verdict : null,
+      }));
+  }
+  return out;
+}
+
 // ================= свежее состояние аккаунта =================
 export function defaultArchive(login) {
   const labAccounts = Engine.mkLabAccounts();
@@ -206,6 +248,7 @@ export function defaultArchive(login) {
     pushSubs: [],
     host: { id: "server", tag: "Сервер XenoAI", until: 9e15 }, // исполнитель — всегда сервер
     aiIdeas: [],
+    shadow: defaultShadow(), // R43: теневая торговля — журнал отказов ИИ и их проверка временем
   };
 }
 
@@ -253,6 +296,7 @@ export function applyServerFields(a, d) {
   if (Array.isArray(d.clearedU)) a.clearedU = d.clearedU.slice(-800);
   if (Array.isArray(d.clearedL)) a.clearedL = d.clearedL.slice(-800);
   if (Array.isArray(d.aiIdeas)) a.aiIdeas = d.aiIdeas.filter((i) => i && i.sym && i.res && typeof i.res.verdict === "string").slice(0, 8);
+  if (d.shadow) a.shadow = normalizeShadow(d.shadow); // R43: теневая торговля
   if (Array.isArray(d.pushSubs)) a.pushSubs = d.pushSubs.filter((s) => s && typeof s.endpoint === "string" && s.endpoint.indexOf("https://") === 0 && s.keys && s.keys.p256dh && s.keys.auth).slice(0, 8);
   if (Array.isArray(d.userClosed) && a.clearedU.length) {
     const t = new Set(a.clearedU);
@@ -283,6 +327,8 @@ export class AccountBrain {
     this.lastSignalKey = "";
     this.newEvents = [];        // события текущего тика (для пушей)
     this.tickLog = [];
+    this._bear = false;         // R43: медвежий режим (пересчитывается каждый тик)
+    this._bearOn = false;       // R43: флаг перехода в медвежий режим (для одноразового события)
   }
 
   price(sym) { const p = this.prices[sym]; return p && p.price ? p.price : (this.a.prices && this.a.prices[sym]) || null; }
@@ -370,6 +416,66 @@ export class AccountBrain {
     for (const c of this.a.userClosed) { if (c.strategy !== "ai") continue; if (c.pnl < 0) n++; else break; }
     return n;
   }
+  // ================= R43: ТЕНЕВАЯ ТОРГОВЛЯ =================
+  // Отказ: кандидат с направлением был, вход не состоялся. Пишем причину и цену решения,
+  // через горизонт часов проверяем фактом: отказ правильный или упустили профит.
+  shadowLog(sym, res, whyCode, why) {
+    if (!this.a.shadow || !Array.isArray(this.a.shadow.list)) this.a.shadow = defaultShadow();
+    const list = this.a.shadow.list;
+    const prev = list.find((x) => x.sym === sym && x.side === res.verdict);
+    if (prev && (!prev.verdict || Date.now() - prev.ts < SHADOW_GAP_MS)) return; // открытая запись или свежий отказ — не дублируем
+    const price = this.price(sym);
+    if (!(price > 0)) return;
+    list.unshift({
+      id: "s" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      ts: Date.now(), sym, side: res.verdict, price,
+      conf: res.confidence || 0,
+      whyCode: String(whyCode || "").slice(0, 16),
+      why: String(why || "").slice(0, 160),
+      evalTs: null, hypPct: null, minPct: null, maxPct: null, verdict: null,
+    });
+    this.a.shadow.list = list.slice(0, SHADOW_MAX);
+  }
+
+  // каждый тик: обновляем экстремумы по неразобранным отказам, разбираем достигшие горизонта
+  shadowTick() {
+    let sh = this.a.shadow;
+    if (!sh || !Array.isArray(sh.list)) this.a.shadow = sh = defaultShadow();
+    const now = Date.now();
+    for (const e of sh.list) {
+      const price = this.price(e.sym);
+      if (!(price > 0)) continue;
+      const dir = e.side === "шорт" ? -1 : 1;
+      const hyp = ((price / e.price - 1) * 100) * dir; // каким был бы итог гипотетической сделки, %
+      e.minPct = e.minPct == null ? hyp : Math.min(e.minPct, hyp);
+      e.maxPct = e.maxPct == null ? hyp : Math.max(e.maxPct, hyp);
+      if (e.verdict == null && now - e.ts >= SHADOW_HORIZON_MS) {
+        e.evalTs = now;
+        e.hypPct = Math.round(hyp * 10) / 10;
+        e.verdict = hyp <= -SHADOW_DEADZONE ? "right" : hyp >= SHADOW_DEADZONE ? "wrong" : "flat";
+        const st = sh.stats = sh.stats || { right: 0, wrong: 0, flat: 0, avoidedSum: 0, avoidedN: 0, since: now };
+        if (e.verdict === "right") { st.right = (st.right || 0) + 1; st.avoidedSum = (st.avoidedSum || 0) + Math.abs(hyp); st.avoidedN = (st.avoidedN || 0) + 1; }
+        else if (e.verdict === "wrong") st.wrong = (st.wrong || 0) + 1;
+        else st.flat = (st.flat || 0) + 1;
+      }
+    }
+  }
+
+  // медвежий режим: BTC глубоко в красе за 24ч или подавляющая часть вотчлиста падает.
+  // Ширина считается только по достаточной выборке (≥10 монет с данными) — на прогретом
+  // кэше первого тика доля «всё в красе» из одной-двух монет не должна включать режим.
+  bearGate() {
+    const btc = this.prices.BTC;
+    const chg = btc && Number.isFinite(btc.chg24h) ? btc.chg24h : 0;
+    let down = 0, n = 0;
+    for (const sym of WATCH_SYMS) {
+      const t = this.prices[sym];
+      if (t && Number.isFinite(t.chg24h)) { n++; if (t.chg24h < 0) down++; }
+    }
+    const breadth = n >= 10 ? down / n : 0;
+    return { bear: chg <= BEAR_GATE.btc24h || breadth >= BEAR_GATE.breadth, chg, breadth };
+  }
+
   symBias(sym) {
     const st = this.brain.symStats[sym];
     if (!st || st.n < 3) return 0;
@@ -672,7 +778,11 @@ export class AccountBrain {
 
     if (!this.a.aiBan || typeof this.a.aiBan !== "object") this.a.aiBan = {};
     if (this.a.aiBan[sym] && Date.now() >= this.a.aiBan[sym]) delete this.a.aiBan[sym];
-    if (this.a.aiBan[sym]) return;
+    if (this.a.aiBan[sym]) {
+      // R43: отказ из-за тайм-аута по монете — фиксируем в «Теневой торговле»
+      if (res.verdict !== "wait") this.shadowLog(sym, res, "бан", "перерыв по монете после стопа — тайм-аут ИИ ещё не истёк");
+      return;
+    }
 
     const aiPos = this.a.userPositions.find((p) => p.sym === sym && p.strategy === "ai");
     const aiCount = this.a.userPositions.filter((p) => p.strategy === "ai").length;
@@ -717,9 +827,13 @@ export class AccountBrain {
         detail: "защита от серии убытков: новые входы приостановлены, открытые позиции обслуживаются · после паузы вернётся сам",
         notify: { kind: "autopilot", data: { on: true } },
       });
+      if (res.verdict !== "wait") this.shadowLog(sym, res, "пауза", "автопилот взял паузу на 30 минут: серия минусов");
       return;
     }
-    if (Date.now() < (this.a.aiCooldownUntil || 0)) return;
+    if (Date.now() < (this.a.aiCooldownUntil || 0)) {
+      if (res.verdict !== "wait") this.shadowLog(sym, res, "пауза", "автопилот на паузе после серии минусов");
+      return;
+    }
 
     const thrNow = this.brain.confThreshold || 74;
     if (thrNow > 74 && (this.a.aiLastEntryTs || 0) > 0 && Date.now() - this.a.aiLastEntryTs > 8 * 3600e3 && Date.now() - (this.a.aiRelaxAt || 0) > 2 * 3600e3) {
@@ -729,11 +843,24 @@ export class AccountBrain {
     }
 
     if (Date.now() - this._aiLastEntryAt < 4 * 60000) return;
-    if (!aiPos && res.verdict !== "wait" && effConf >= thr && (res.agreeShare == null || res.agreeShare >= 0.55) && aiCount < this.effMaxPos()) {
-      if (!guard.ok || !rg.ok) return;
-      if (!this.heatGuard().ok) return;
+
+    // R43: гейт входа с явной цепочкой причин — каждый отказ попадает в «Теневую торговлю».
+    // Медвежий режим добавляет +6 к порогу: в падении торгуем только отборное («почти всё в кэше»).
+    const bump = this._bear ? BEAR_GATE.bump : 0;
+    const thrEntry = thr + bump;
+    if (!aiPos && res.verdict !== "wait") {
+      const maxPos = this.effMaxPos();
+      const hg = this.heatGuard();
       const sc = this.aiSizeCalc();
-      if (sc.size <= 0) return;
+      let refuse = "";
+      if (effConf < thrEntry) refuse = `порог: уверенность ${effConf}% < ${thrEntry}%${bump ? " · медвежий режим +6" : ""}`;
+      else if (res.agreeShare != null && res.agreeShare < 0.55) refuse = `ансамбль: согласие факторов ${Math.round(res.agreeShare * 100)}% < 55%`;
+      else if (aiCount >= maxPos) refuse = `лимит: позиций уже ${aiCount} из ${maxPos}`;
+      else if (!guard.ok) refuse = `фильтр: ${guard.why}`;
+      else if (!rg.ok) refuse = `риск: ${rg.why}`;
+      else if (!hg.ok) refuse = `нагрузка: ${hg.why}`;
+      else if (!(sc.size > 0)) refuse = "размер: расчётный объём сделки 0";
+      if (refuse) { this.shadowLog(sym, res, refuse.split(":")[0], refuse); return; }
       this.aiOpenInternal(res, sc.size, true, "скам-фильтр, новости и риск-гвард ок");
       this._aiLastEntryAt = Date.now();
       this.a.aiLastEntryTs = Date.now();
@@ -941,6 +1068,19 @@ export class AccountBrain {
         this.tickLog.push("klines " + sym + ": " + (e && e.message));
       }
     }
+
+    // R43: медвежий режим (порог +6) и проверка отказов «Теневой торговли» по свежим ценам
+    const bearNow = this.bearGate();
+    this._bear = bearNow.bear;
+    if (bearNow.bear && !this._bearOn) {
+      this.pushEvent({
+        tone: "bear",
+        title: `Медвежий режим: порог входа ${(this.brain.confThreshold || 74) + BEAR_GATE.bump}%`,
+        detail: `BTC ${bearNow.chg.toFixed(1)}% за 24ч · в красе ${Math.round(bearNow.breadth * 100)}% вотчлиста — входы только отборные, отказы видны во вкладке «Тень»`,
+      });
+    }
+    this._bearOn = bearNow.bear;
+    try { this.shadowTick(); } catch (e) { /* журнал отказов не критичен */ }
 
     // 4) сессия: эквити-история
     this.a.equityHist = [...this.a.equityHist, { ts: now, v: Math.round(this.totalEquity()) }].slice(-300);

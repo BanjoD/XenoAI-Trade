@@ -729,7 +729,113 @@ const Views = (() => {
     </div>`;
   }
 
-  return { desk, signals, whales, events, leaders, signalForecast };
+  // ================= R43: ТЕНЕВАЯ ТОРГОВЛЯ =================
+  // По мотивам поста Sova (t.me/tapovich_gram/7512): аналитика решений ИИ «от А до Я» —
+  // где отказались и что было дальше. Тапович: 49 из 50 отказов верны (монеты упали 10–30%).
+  function shadow() {
+    const s = S();
+    const sh = s.shadow || { list: [], stats: {} };
+    const st = sh.stats || {};
+    const decided = (st.right || 0) + (st.wrong || 0);
+    const acc = decided ? Math.round(((st.right || 0) / decided) * 100) : null;
+    const avgAvoid = st.avoidedN ? (st.avoidedSum / st.avoidedN) : null;
+    const list = (sh.list || []).slice(0, 40);
+    const pending = list.filter((e) => !e.verdict).length;
+
+    // медвежий режим — та же формула, что на сервере: BTC −3% за 24ч или ≥70% в красе
+    const btcT = s.prices && s.prices.BTC;
+    let down = 0, n = 0;
+    if (s.prices) for (const sym of Object.keys(s.prices)) {
+      const t = s.prices[sym];
+      if (t && Number.isFinite(t.chg24h)) { n++; if (t.chg24h < 0) down++; }
+    }
+    const bear = btcT && Number.isFinite(btcT.chg24h) ? (btcT.chg24h <= -3 || (n ? down / n >= 0.7 : false)) : null;
+
+    const rows = list.map((e) => {
+      const ageMin = Math.round((Date.now() - e.ts) / 60000);
+      const dir = e.side === "шорт" ? -1 : 1;
+      const tk = s.prices && s.prices[e.sym];
+      const curHyp = tk && tk.price > 0 ? (((tk.price / e.price - 1) * 100) * dir) : null;
+      const worst = e.minPct != null ? e.minPct : null;
+      const best = e.maxPct != null ? e.maxPct : null;
+      let outHtml;
+      if (e.verdict === "right") {
+        outHtml = `<span class="np-ok">отказ верный · сделка была бы ${e.hypPct > 0 ? "+" : "−"}${Math.abs(e.hypPct).toFixed(1)}%</span>`
+          + (worst != null && worst < e.hypPct ? ` <span style="color:#71717a">· в горизонте доходило до ${worst.toFixed(1)}%</span>` : "");
+      } else if (e.verdict === "wrong") {
+        outHtml = `<span class="np-warn">упустили профит · сделка дала бы ${e.hypPct > 0 ? "+" : "−"}${Math.abs(e.hypPct).toFixed(1)}%</span>`
+          + (best != null && best > e.hypPct ? ` <span style="color:#71717a">· в горизонте было до ${best > 0 ? "+" : "−"}${Math.abs(best).toFixed(1)}%</span>` : "");
+      } else if (e.verdict === "flat") {
+        outHtml = `<span style="color:#71717a">мимо кассы · движение ${e.hypPct > 0 ? "+" : "−"}${Math.abs(e.hypPct).toFixed(1)}% (±1%)</span>`;
+      } else {
+        const leftH = Math.max(0, Math.ceil((8 * 60 - ageMin) / 60));
+        outHtml = `<span style="color:#71717a">проверка через ${leftH} ч</span>${curHyp != null ? ` · <span class="${curHyp < 0 ? "text-green" : curHyp > 0 ? "text-red" : ""}">сейчас сделка была бы ${curHyp > 0 ? "+" : "−"}${Math.abs(curHyp).toFixed(1)}%</span>` : ""}`;
+      }
+      return `<div class="ev-row" style="display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
+        <div style="min-width:0;flex:1">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <b style="font-size:14px">${h.esc(e.sym)}</b>
+            ${h.tag(e.side === "лонг" ? "green" : "red", e.side)}
+            <span class="num" style="font-size:12px;color:#71717a">уверенность ${e.conf}%</span>
+            <span class="num" style="font-size:12px;color:#71717a">${Fmt.fmtTimeAgo(ageMin)} назад</span>
+          </div>
+          <div style="margin-top:3px;font-size:13px;color:#d4d4d8">${h.esc(e.why || e.whyCode)}</div>
+          <div style="margin-top:2px;font-size:12px" class="num">цена решения ${Fmt.fmtPrice(e.price)} · ${outHtml}</div>
+        </div>
+      </div>`;
+    }).join("");
+
+    const closedAi = (s.userClosed || []).filter((c) => c.strategy === "ai").slice(0, 6);
+    const enteredRows = closedAi.map((c) => `<div class="ev-row" style="display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
+      <div style="min-width:0">
+        <b style="font-size:13px">${h.esc(c.sym)}</b> <span style="font-size:12px;color:#71717a">${c.side} · ${Fmt.fmtTimeAgo(Math.round((Date.now() - (c.closedAt || c.openedAt || Date.now())) / 60000))} назад · ${h.esc(c.exitReason || "")}</span>
+      </div>
+      <span class="num ${c.pnl >= 0 ? "text-green" : "text-red"}" style="white-space:nowrap">${c.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(c.pnl)))} ХРЮ</span>
+    </div>`).join("");
+
+    const statHtml = `
+      <div class="stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr))">
+        ${h.statCard("Фильтр прав", acc != null ? `${acc}%` : "—", acc != null && acc >= 60 ? "text-green" : acc != null ? "text-red" : "",
+          `${st.right || 0} верных · ${st.wrong || 0} упущенных · ${st.flat || 0} мимо кассы`)}
+        ${h.statCard("Отказов в журнале", `${list.length}`, "", `${pending} на проверке · горизонт 8 ч`)}
+        ${h.statCard("Избежали в среднем", avgAvoid != null ? `−${avgAvoid.toFixed(1)}%` : "—", avgAvoid != null ? "text-green" : "",
+          "движение против сделки у верных отказов")}
+      </div>`;
+
+    const html = `
+    <div class="stack">
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">Теневая торговля</h1>
+          <p class="page-sub">Каждое решение ИИ от А до Я: почему отказались и что было дальше · по мотивам поста Sova</p>
+        </div>
+        <div class="live-pill hidden-sm">${h.onlineDot()} live</div>
+      </div>
+      ${statHtml}
+      <section class="card" style="padding:14px">
+        <div class="notify-sec">Режим фильтрации</div>
+        <div style="font-size:13px;color:#d4d4d8;line-height:1.5">
+          ${bear === null ? "Режим рынка определяется на сервере по свежим ценам." :
+            bear ? `<b style="color:#fbbf24">Медвежий режим включён</b> — порог входа +6%: в падении торгуем только отборное, почти всё остальное идёт в отказ (и проверяется фактом ниже).` :
+            `<b style="color:#4ade80">Обычный режим</b> — базовый порог входа. Как только BTC уйдёт глубже −3% за 24ч (или ≥70% вотчлиста в красе), порог поднимется, а отказы начнут копиться здесь.`}
+        </div>
+      </section>
+      <section class="card" style="padding:14px">
+        <div class="notify-sec">Журнал отказов · что было бы, если бы вошли</div>
+        ${rows || `<div style="padding:14px 0;color:#71717a;font-size:13px">Пока пусто: автопилот либо торгует всё подряд, либо сканер ещё не сделал первых отказов. Записи появляются с серверных тиков (каждые 2 мин), проверка исхода — через 8 часов после отказа.</div>`}
+      </section>
+      <section class="card" style="padding:14px">
+        <div class="notify-sec">А что с теми, вошли ли</div>
+        ${enteredRows || `<div style="padding:14px 0;color:#71717a;font-size:13px">Закрытых ИИ-сделок пока нет.</div>`}
+      </section>
+      <div class="notify-install">
+        <b>Как это работает:</b> каждый кандидат с направлением, которому отказали фильтры (порог уверенности, скам-фильтр, новостной риск, лимиты, паузы), попадает в журнал с ценой решения. Через 8 часов сервер проверяет фактом: если сделка в этом направлении была бы в минусе — <b style="color:#4ade80">отказ верный</b>; если в плюсе — <b style="color:#fbbf24">упустили профит</b>. Так видно, строгий ли фильтр на самом деле, — та же «теневая аналитика», что описал Sova: у него 49 из 50 отказов оказались верными, монеты после отказа падали на 10–30%.
+      </div>
+    </div>`;
+    return { html, mount() {} };
+  }
+
+  return { desk, signals, whales, events, leaders, shadow, signalForecast };
 })();
 
 window.Views = Views;

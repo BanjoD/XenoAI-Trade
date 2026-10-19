@@ -20,7 +20,7 @@ const TEXTDB_BASE = "https://textdb.online/";
 const TICK_MS = 2 * 60000;       // тик ИИ каждые 2 минуты
 const NEWS_MS = 10 * 60000;      // новостная лента раз в 10 минут
 const SCAN_PER_TICK = 8;         // монет в скане за тик (ротация по кругу ≈ каждые 6-7 мин на монету)
-export const BUILD = "r40";
+export const BUILD = "r43";
 
 const PASSWORDS = { david: "ETH123aAgo", yura: "BTCmyB671" };
 
@@ -240,6 +240,16 @@ export class Room {
         const res = await this.runTick();
         return json({ ok: true, ...res });
       }
+      // R42: тестовый пуш с сервера — нажатие кнопки в модалке уведомлений.
+      // Ответ содержит по-подписочный результат доставки (статус FCM) — по нему видно,
+      // где обрыв: 201 = доставлено в браузер устройства (если шторка пуста — дело в
+      // разрешении Android/Chrome на устройстве), 410 = подписка мертва (пересоздаётся сама).
+      if (path === "/pushtest" && req.method === "POST") {
+        await this.loadState(login);
+        const res = await this.pushTest();
+        await this.saveState();
+        return json({ ok: true, ...res, subs: ((this.state.pushSubs) || []).length });
+      }
       return json({ ok: false, error: "неизвестный маршрут DO: " + path }, 404);
     } catch (e) {
       this.lastError = String((e && e.message) || e);
@@ -320,6 +330,8 @@ export class Room {
       };
       for (const sub of subs) {
         const r = await sendPush(sub, payload, { urgency: ev.tone === "bear" ? "high" : "normal", ttl: 7200, timeoutMs: 8000 });
+        // R42: запоминаем результат последней доставки — виден в модалке уведомлений
+        sub.last = { ts: Date.now(), status: r.status || 0, ok: Boolean(r.ok) };
         if (r.ok) sent++;
         else if (r.dead && !deadEndpoints.includes(sub.endpoint)) deadEndpoints.push(sub.endpoint);
       }
@@ -328,6 +340,29 @@ export class Room {
       this.state.pushSubs = (this.state.pushSubs || []).filter((s) => !deadEndpoints.includes(s.endpoint));
     }
     return { sent, dead: deadEndpoints.length };
+  }
+
+  // ---------- R42: тестовый пуш по всем подпискам аккаунта (кнопка диагностики) ----------
+  async pushTest() {
+    const subs = ((this.state && this.state.pushSubs) || []).filter((s) => s && s.endpoint && s.keys);
+    const payload = {
+      title: "Тестовый пуш XenoAI",
+      body: "Доставка с сервера работает · " + new Date().toISOString().slice(11, 16) + " UTC. Если видите это в шторке — пуши до устройства доходят.",
+      tag: "srvtest:" + Date.now(),
+      url: "./",
+    };
+    const deadEndpoints = [];
+    const results = [];
+    for (const sub of subs) {
+      const r = await sendPush(sub, payload, { urgency: "high", ttl: 600, timeoutMs: 10000 });
+      sub.last = { ts: Date.now(), status: r.status || 0, ok: Boolean(r.ok) };
+      if (r.dead) deadEndpoints.push(sub.endpoint);
+      results.push({ endpoint: String(sub.endpoint).slice(-14), status: r.status || 0, ok: Boolean(r.ok), dead: Boolean(r.dead), why: r.why || "" });
+    }
+    if (deadEndpoints.length) {
+      this.state.pushSubs = (this.state.pushSubs || []).filter((s) => !deadEndpoints.includes(s.endpoint));
+    }
+    return { results, sent: results.filter((r) => r.ok).length };
   }
 
   // ---------- alarm: само-возобновляющийся таймер автономной торговли ----------

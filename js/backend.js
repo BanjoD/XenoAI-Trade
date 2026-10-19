@@ -148,6 +148,16 @@ const Server = (() => {
     if (!active()) return { ok: false };
     return action("pushUnsub", { endpoint });
   }
+  // R42: тестовый пуш с сервера по всем подпискам аккаунта (диагностика доставки)
+  async function pushTest() {
+    if (!active()) return { ok: false, error: "бэкенд не активен" };
+    try {
+      const j = await api("/api/push-test", { method: "POST", body: {}, timeoutMs: 30000 });
+      return j;
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  }
 
   // ---------- фоновый опрос ----------
   function startPolling(hook) {
@@ -172,7 +182,7 @@ const Server = (() => {
 
   return {
     configured, active, sessionLogin, login, logout,
-    pull, action, bootstrap, pushSub, pushUnsub, startPolling, info,
+    pull, action, bootstrap, pushSub, pushUnsub, pushTest, startPolling, info,
     _ctl: ctl,
   };
 })();

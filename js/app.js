@@ -14,6 +14,7 @@ const App = (() => {
   const NAV = [
     { id: "desk", label: "Деск", icon: "grid" },
     { id: "signals", label: "Сигналы", icon: "zap" },
+    { id: "shadow", label: "Тень", icon: "eye" },
     { id: "whales", label: "Киты", icon: "fish" },
     { id: "market", label: "Рынок", icon: "candles" },
     { id: "events", label: "События", icon: "radio" },
@@ -30,8 +31,8 @@ const App = (() => {
   // На http(s) — чистые пути /signals, /trades (на Vercel vercel.json отдаёт index.html
   // на любой путь). Локально с файла — hash-режим #/signals. F5, «назад/вперёд» и ссылки
   // сохраняют вкладку — URL можно отправлять другим.
-  const VIEW_IDS = ["desk", "signals", "whales", "market", "events", "trades", "accounts", "portfolio", "leaders"];
-  const VIEW_TITLES = { desk: "Деск", signals: "Сигналы", whales: "Киты", market: "Рынок", events: "События", trades: "Сделки", accounts: "Счета", portfolio: "Портфель", leaders: "Лидеры" };
+  const VIEW_IDS = ["desk", "signals", "shadow", "whales", "market", "events", "trades", "accounts", "portfolio", "leaders"];
+  const VIEW_TITLES = { desk: "Деск", signals: "Сигналы", shadow: "Тень", whales: "Киты", market: "Рынок", events: "События", trades: "Сделки", accounts: "Счета", portfolio: "Портфель", leaders: "Лидеры" };
   const BASE_TITLE = "XenoAI Trade — платформа автоматического ИИ-трейдинга";
   let hashNav = false;
   function isHttp() { return location.protocol === "http:" || location.protocol === "https:"; }
@@ -118,16 +119,25 @@ const App = (() => {
   function badgeFor(id) {
     const s = Store.state;
     if (id === "events") return s.events.length;
-    if (id === "trades") return s.labPositions.length + s.userPositions.length;
+    if (id === "trades") {
+      // Сначала реальные (демо) позиции пользователя, лабораторные — в скобках:
+      // «0 (2)» = 0 своих + 2 лабораторных. Без лабораторных — просто число своих.
+      const user = s.userPositions.length, lab = s.labPositions.length;
+      if (lab > 0) return `${user} (${lab})`;
+      return user;
+    }
     if (id === "signals") return s.signals.length;
     return undefined;
   }
+
+  // бейдж может быть числом или строкой «0 (2)» — пустые/нулевые не показываем
+  function badgeVisible(badge) { return badge !== undefined && badge !== 0 && badge !== ""; }
 
   function navItem(n, active, badge) {
     return `<button class="nav-item ${active ? "active" : ""}" data-action="nav" data-arg="${n.id}">
       ${h.icon(n.icon, 17)}
       <span style="flex:1;text-align:left">${n.label}</span>
-      ${badge !== undefined && badge > 0 ? `<span class="nv-badge num">${badge}</span>` : ""}
+      ${badgeVisible(badge) ? `<span class="nv-badge num">${badge}</span>` : ""}
     </button>`;
   }
 
@@ -327,7 +337,7 @@ const App = (() => {
       const id = b.getAttribute("data-arg");
       const badge = b.querySelector(".nv-badge");
       const val = badgeFor(id);
-      if (val !== undefined && val > 0) {
+      if (badgeVisible(val)) {
         if (badge) badge.textContent = val;
         else {
           const sp = document.createElement("span");
@@ -883,6 +893,30 @@ const App = (() => {
           else h.toast("error", "Подписка не создана", r.why || "попробуйте ещё раз");
           refreshNotifyModal();
         });
+        break;
+      }
+      case "notify:push-test": {
+        // R42: настоящий тестовый пуш с сервера — честная проверка всей цепочки доставки
+        if (!window.Server || !Server.active()) {
+          h.toast("error", "Сервер не активен", "Тестовый пуш отправляет сервер — дождитесь подключения к бэкенду");
+          break;
+        }
+        const out = document.getElementById("push-test-result");
+        if (out) out.innerHTML = '<span class="np-warn">отправляю с сервера…</span>';
+        const tr = await Server.pushTest();
+        if (!tr.ok) {
+          if (out) out.innerHTML = "";
+          h.toast("error", "Тест не удался", tr.error || "сервер недоступен");
+          break;
+        }
+        const sent = tr.sent || 0, total = (tr.results || []).length;
+        const detail = (tr.results || []).map((x) => "…" + x.endpoint + " · HTTP " + x.status).join(" · ");
+        if (out) out.innerHTML = total
+          ? `<span class="${sent ? "np-ok" : "np-warn"} num">${sent}/${total} доставлено · ${h.esc(detail)}</span>`
+          : '<span class="np-warn">на сервере нет подписок — включите пуши выше</span>';
+        h.toast(sent ? "success" : "error",
+          sent ? "Тестовый пуш отправлен сервером" : "Пуш не доставлен",
+          sent ? "Смотрите шторку уведомлений устройства — и всплывашку здесь, в приложении" : (detail || "нет подписок"));
         break;
       }
       case "fs:toggle": {

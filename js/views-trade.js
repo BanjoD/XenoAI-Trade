@@ -1161,6 +1161,17 @@ const ViewsTrade = (() => {
     // ---- push на смартфон: нативный Web Push (R30) — только разрешение, ничего больше ----
     const pc = Notify.getPushCache ? Notify.getPushCache() : { on: false, why: "" };
     const epTail = pc.endpoint ? String(pc.endpoint).slice(-14) : "";
+    // R42: статус подписок на сервере + результат последней доставки (room.js пишет sub.last)
+    const srvSubs = (window.Store && Store.state.pushSubs) || [];
+    const srvList = srvSubs.map((s) => {
+      const tail = h.esc(String(s.endpoint || "").slice(-14));
+      if (s.last && s.last.ts) {
+        const t = new Date(s.last.ts);
+        const hh = String(t.getHours()).padStart(2, "0") + ":" + String(t.getMinutes()).padStart(2, "0");
+        return `<span class="${s.last.ok ? "np-ok" : "np-warn"}">${tail} · ${hh} · HTTP ${s.last.status || "—"}</span>`;
+      }
+      return `<span class="np-warn">${tail} · доставок ещё не было</span>`;
+    }).join(" · ");
     const pushHtml = `
       <div class="notify-sec">Push на смартфон · даже при закрытом приложении</div>
       <div class="notify-install">
@@ -1177,7 +1188,15 @@ const ViewsTrade = (() => {
           ? ""
           : `<button class="btn-lime" data-action="notify:push-enable" title="Создать подписку Web Push для этого устройства">${h.icon("bell", 13)} Подписать на пуши</button>`}
       </div>
-      <div class="ai-limit-note">После переустановки приложения или очистки данных браузера подписка обновится сама при первом запуске — нажимать ничего не нужно (кнопка здесь на случай, если что-то пошло не так).</div>`;
+      <div class="ai-limit-row" style="flex-wrap:wrap;gap:8px">
+        <span class="lbl">${h.icon("wallet", 12)} сервер</span>
+        ${srvSubs.length ? `<span style="display:inline-flex;flex-wrap:wrap;gap:8px">${srvList}</span>` : `<span class="np-warn">на сервере нет подписок — включите пуши выше</span>`}
+      </div>
+      <div class="ai-limit-row" style="flex-wrap:wrap;gap:8px">
+        <button class="btn-lime" data-action="notify:push-test" title="Сервер отправит настоящий пуш по подпискам аккаунта">${h.icon("bell", 13)} Тестовый пуш с сервера</button>
+        <span id="push-test-result"></span>
+      </div>
+      <div class="ai-limit-note">После переустановки приложения или очистки данных браузера подписка обновится сама при первом запуске — нажимать ничего не нужно (кнопка «Подписать» — на случай, если что-то пошло не так). Тестовый пуш показывает честный статус доставки: <b>HTTP 201</b> — сервер отправил, браузер устройства получил. Если 201 есть, а в шторке пусто: (1) Android 13+ — включите уведомления для самого Chrome: Настройки → Приложения → Chrome → Уведомления; (2) проверьте, не замучен ли сайт в Chrome (замок в адресной строке → Уведомления); (3) iPhone — пуши только в приложении, установленном на «Домой». <b>HTTP 410</b> — подписка устарела: нажмите «Подписать на пуши».</div>`;
 
     const actionsHtml = `
       <div class="notify-actions">

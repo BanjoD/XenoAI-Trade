@@ -4,7 +4,7 @@
    в симуляцию, но продолжает работать (кэш отдаёт оболочку приложения). */
 "use strict";
 
-const VERSION = "xenoai-v16";
+const VERSION = "xenoai-v19";
 const CORE = [
   "./",
   "./index.html",
@@ -135,6 +135,13 @@ self.addEventListener("push", (event) => {
       silent: p.silent === true,
       vibrate: p.silent === true ? undefined : [90, 45, 90],
       data: { url: p.url || "./" },
-    })
+    }).then(() =>
+      // R42: сообщаем открытым окнам, что пуш реально доставлен на устройство —
+      // по всплывашке в приложении видно, что доставка работает, даже если
+      // системная шторка подавлена настройками Android
+      self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((cs) => {
+        for (const c of cs) { try { c.postMessage({ type: "push-shown", title: p.title, tag: p.tag || "" }); } catch (e) { /* noop */ } }
+      })
+    ).catch(() => {})
   );
 });
