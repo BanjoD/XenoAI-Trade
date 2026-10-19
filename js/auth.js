@@ -193,8 +193,11 @@ const Auth = (() => {
       return;
     }
     error = null;
+    // R32: креды пробрасываются в afterLogin — платформа тем же входом авторизуется
+    // и на сервере (если бэкенд задеплоен), чтобы аккаунт сразу жил на сервере
+    const creds = { login: lastLogin, password: lastPw };
     lastLogin = ""; lastPw = "";
-    App.afterLogin();
+    App.afterLogin(creds);
   }
 
   return { ADMINS, readSession, sessionLogin, dataKey, login, logout, syncCodeFor, sha256hex, authScreen, submit, readInputs, credsReady() { return Boolean(lastLogin.trim() && lastPw); }, setTab(t) { tab = t; error = null; }, get tab() { return tab; }, toggleEye() { showPw = !showPw; }, get showPw() { return showPw; } };

@@ -1,0 +1,23 @@
+# XenoAI Trade — СЕРВЕР: Cloudflare Worker + Durable Object (бесплатный план).
+# Деплой автоматический: .github/workflows/deploy-backend.yml (нужен один секрет
+# CLOUDFLARE_API_TOKEN — инструкция в BACKEND-SETUP.md).
+
+name = "xenoai-trade-backend"
+main = "src/router.js"
+compatibility_date = "2026-09-01"
+
+[triggers]
+crons = ["*/2 * * * *"]   # страховочный тик автономной торговли (основной — alarm DO)
+
+[vars]
+ACCOUNTS = "david,yura"
+VAPID_SUB = "mailto:xenoai-trade@users.noreply.github.com"
+# ADMIN_TOKEN_SECRET добавляется деплой-воркфлоу через `wrangler secret put` (случайный).
+
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]

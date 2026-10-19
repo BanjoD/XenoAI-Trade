@@ -393,7 +393,7 @@ const App = (() => {
     if (mr && mr.childElementCount) h.showModal(ViewsTrade.notifyModal(), {});
   }
 
-  function afterLogin() {
+  async function afterLogin(creds) {
     document.getElementById("root").innerHTML = `
     <div class="splash">
       <div class="splash-inner">
@@ -401,6 +401,14 @@ const App = (() => {
         <div class="t"><span class="online-dot" style="background:var(--accent);width:6px;height:6px"></span> Загрузка платформы…</div>
       </div>
     </div>`;
+    // R32: если бэкенд задеплоен — теми же кредами входим на сервер ПЕРЕД загрузкой
+    // аккаунта: состояние сразу тянется с сервера, торговля идёт автономно 24/7
+    if (creds && window.Server && Server.configured() && !Server.active()) {
+      try {
+        const r = await Server.login(creds.login, creds.password);
+        if (r.ok) console.info("[xenoai] серверный аккаунт активен");
+      } catch (e) { /* сервер недоступен — работаем локально */ }
+    }
     Store.switchUser();
     setTimeout(() => {
       document.getElementById("root").innerHTML = shellHtml();

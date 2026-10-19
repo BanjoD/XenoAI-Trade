@@ -258,12 +258,59 @@ const Notify = (() => {
     return Promise.resolve(exit).then(() => false).catch(() => false);
   }
 
+  // R32: САМОЗАЛЕЧИВАНИЕ ПОДПИСКИ. Диагноз R32: подписки умирают (410 Gone после
+  // переустановки PWA/смены SW/чистки браузера) и больше не восстанавливаются —
+  // «пуши работают только при первом заходе». Лечится циклом: пока разрешение
+  // выдано, но живой подписки нет — создаём заново; живая подписка каждые 10 минут
+  // перерегистрируется НА СЕРВЕРЕ (пуши отныне шлёт сервер, а не Страж).
+  function pushHealthLoop() {
+    if (pushHealthTimer || typeof setInterval !== "function") return;
+    pushHealthTimer = setInterval(async () => {
+      try {
+        if (permission() !== "granted" || !pushSupported()) return;
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (!reg) return;
+        let sub = await reg.pushManager.getSubscription();
+        if (!sub) {
+          // подписка умерла/исчезла — молча создаём новую (пользователь ничего не нажимает)
+          await ensureSubscription().catch(() => {});
+          return;
+        }
+        // живая подписка: перерегистрируем на сервере (heal потерь регистрации)
+        if (window.Server && Server.active()) {
+          const raw = sub.toJSON();
+          if (raw && raw.endpoint && raw.keys) Server.pushSub({ endpoint: raw.endpoint, keys: raw.keys });
+        }
+      } catch (e) { /* канал не критичен */ }
+    }, 10 * 60000);
+  }
+  let pushHealthTimer = null;
+
   function init() {
     hookStore();
     // R30: разрешение уже выдано ранее, а подписки нет (обновление страницы, сброс SW) —
-    // восстанавливаем её молча: пользователю не нужно ничего нажимать повторно
+    // восстанавливаем её молча: пользователю не нужно ничего нажимать повторно.
+    // R32: три попытки с нарастающей задержкой (SW может быть ещё не готов) + вечный
+    // цикл здоровья: умершая подписка восстанавливается сама.
     if (permission() === "granted" && pushSupported()) {
-      setTimeout(() => { ensureSubscription().catch(() => {}); }, 2500);
+      const tryEnsure = (n) => {
+        if (n <= 0) return;
+        setTimeout(() => {
+          (async () => {
+            try {
+              const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration();
+              const hasSub = reg && await reg.pushManager.getSubscription();
+              if (!hasSub) {
+                const r = await ensureSubscription();
+                if (r && r.ok) return;
+              }
+            } catch (e) { /* повторим */ }
+            tryEnsure(n - 1);
+          })();
+        }, n === 3 ? 2500 : n === 2 ? 10000 : 25000);
+      };
+      tryEnsure(3);
+      pushHealthLoop();
     }
   }
 

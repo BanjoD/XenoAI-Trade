@@ -503,6 +503,15 @@ const Store = (() => {
     restorePriceSnapshot(); // R30: цены прошлого сеанса — до первого ответа источников
     loadDeviceId(); // R31: идентичность устройства для аренды исполнителя
     lastPersistFp = fpOf(archiveAccount()); // фоновый персист после загрузки не должен двигать часы
+    // R32: СЕРВЕРНЫЙ РЕЖИМ — подтянуть состояние сервера и включить опрос (12 с);
+    // локальный архив одноразово предлагается серверу (union без потерь при первом входе)
+    if (serverMode()) {
+      try {
+        Server.bootstrap(archiveAccount());
+        Server.startPolling(() => { if (state.started && !document.hidden) Server.pull(applyServerArchive); });
+      } catch (e) { /* сервер недоступен — остаёмся в локальном режиме */ }
+      setTimeout(() => { if (window.Server && Server.active()) Server.pull(applyServerArchive); }, 800);
+    }
     initSyncRuntime(); // синхронизация устройств: метаданные + опрос облака
     initBrainSync(); // тянет облако и запускает периодический опрос (один раз за загрузку страницы)
   }
@@ -809,6 +818,8 @@ const Store = (() => {
     return deviceId;
   }
   function hostActive() {
+    // R32: в серверном режиме исполнителем показываем сам сервер
+    if (serverMode()) return { id: "server", tag: "Сервер XenoAI", until: 9e15 };
     return (state.host && state.host.id && (state.host.until || 0) > Date.now()) ? state.host : null;
   }
   function isAutoHost() {
@@ -818,6 +829,7 @@ const Store = (() => {
   function hostFree() { return !hostActive(); }
   // заявка на исполнение: свободно → берём; уже наше → true; чужая живая аренда → false
   function claimHost(tag) {
+    if (serverMode()) return false; // аренда принадлежит серверу
     loadDeviceId();
     if (isAutoHost()) return true;
     if (!hostFree()) return false;
@@ -838,8 +850,10 @@ const Store = (() => {
     if (!silent) { persist(); emit(); }
     return true;
   }
-  // исполнитель берётся сам, как только аренда освободилась и включена автоторговля
+  // исполнитель берётся сам, как только аренда освободилась и включена автоторговля.
+  // R32: в серверном режиме исполнитель — сам сервер, устройства ничего не заявляют
   function maybeTakeHost() {
+    if (serverMode()) return;
     if (!state.started || syncCtl.busy) return;
     if (!(state.aiAuto || state.autoTrade)) return;
     if (isAutoHost() || !hostFree()) return;
@@ -884,6 +898,8 @@ const Store = (() => {
   // Вызывается по расписанию (20 с), после изменений (debounce 8 с), по фокусу/сети
   // и вручную («Синхронизировать сейчас»).
   function syncCycle() {
+    // R32: серверный режим — цикл синхронизации = опрос состояния сервера
+    if (serverMode()) { Server.pull(applyServerArchive); return Promise.resolve(false); }
     if (!state.started || !state.sync.enabled || !state.sync.code) return Promise.resolve(false);
     if (syncCtl.busy) { syncCtl.pending = true; return Promise.resolve(false); }
     syncCtl.busy = true;
@@ -931,8 +947,44 @@ const Store = (() => {
   function syncPull() { return syncCycle(); }
   function syncPush() { return syncCycle(); }
   function scheduleSyncPush() {
+    // R32: в серверном режиме (бэкенд задеплоен и активен) textdb-запись не нужна —
+    // сервер и есть облако, состояние уезжает с действиями и опросом
+    if (serverMode()) return;
     if (!state.sync.enabled || !state.sync.code || syncCtl.pushTimer) return;
     syncCtl.pushTimer = setTimeout(() => { syncCtl.pushTimer = null; syncCycle(); }, 8000);
+  }
+
+  // ======== R32: СЕРВЕРНЫЙ РЕЖИМ (бэкенд Cloudflare Worker + Durable Object) ========
+  // Бэкенд задеплоен (backend-config.js с URL) и в этом браузере есть токен → аккаунт
+  // ЖИВЁТ НА СЕРВЕРЕ: все действия (открыть/закрыть/очистить историю/настройки) исполняются
+  // сервером, локальное состояние — его отражение (опрос каждые 12 с). Автопилот торгует
+  // на сервере каждые 2 минуты — браузер может быть полностью выключен.
+  function serverMode() {
+    return Boolean(typeof window !== "undefined" && window.Server && Server.active());
+  }
+  // применение серверного архива: сервер — единственный источник правды, его архив
+  // заменяет локальное содержимое целиком (действия и так исполняются на сервере)
+  function applyServerArchive(a) {
+    if (!a || typeof a !== "object" || !Array.isArray(a.userClosed)) return;
+    applyArchive(a);
+    state.updatedAt = a.updatedAt || Date.now();
+    lastPersistFp = null; // локальный кэш должен переписаться серверным содержимым
+    persist();
+    emit();
+  }
+  // серверное исполнение действия + мгновенный optimistic-отклик для UI.
+  // Локально применяем ту же логику (тот же код, что и раньше) — сервер повторит
+  // действие АВТОРИТАРНО со своим свежим состоянием; расхождения исчезают при
+  // ближайшем опросе (≤12 с), серверная версия всегда побеждает.
+  function serverAction(type, payload, localFn) {
+    const localRes = localFn ? localFn() : { ok: true };
+    Server.action(type, payload, applyServerArchive).then((srv) => {
+      if (srv && srv.ok === false && localRes && localRes.ok) {
+        // сервер отказал (его состояние свежее/строже) — честно сообщаем в ленту
+        pushEvent({ tone: "bear", title: "Сервер отклонил действие: " + type, detail: String(srv.error || "") });
+      }
+    }).catch(() => { /* сеть — сервер примет действие при повторе или истечёт по опросу */ });
+    return localRes;
   }
   // «отпечаток» архива: состав баланса/позиций/истории/настроек без ревизий.
   // Нужен, чтобы синхронизация не зацикливалась: если содержимое после слияния
@@ -1009,6 +1061,9 @@ const Store = (() => {
       pushEvent({ tone: "neutral", title: "Синхронизация устройств включена", detail: `единый аккаунт — единые данные: баланс, открытые позиции и вся история синхронизируются между устройствами автоматически (код аккаунта ${state.sync.code}, виден в Кабинете; отключения не предусмотрено)` });
     }
     if (state.sync.enabled && state.sync.code) {
+      // R32: в серверном режиме textdb-таймеры и beacon не нужны — сервер опрашивается
+      // своим циклом (Server.startPolling), действия уезжают по факту
+      if (serverMode()) { persistSyncMeta(); return; }
       if (typeof setInterval === "function" && !syncCtl.pollTimer) {
         syncCtl.pollTimer = setInterval(() => { if (state.started && state.sync.enabled) syncPull(); }, 20000);
       }
@@ -1091,6 +1146,11 @@ const Store = (() => {
       ts: Date.now(), ua: (typeof navigator !== "undefined" && navigator.userAgent || "").slice(0, 140),
     });
     state.pushSubs = rest.slice(0, 8);
+    // R32: подписка немедленно регистрируется НА СЕРВЕРЕ (пуши шлёт сервер) —
+    // и не зависит от синхронизации текстового облака
+    if (serverMode()) {
+      try { Server.pushSub({ endpoint: sub.endpoint, keys: sub.keys }, (typeof navigator !== "undefined" && navigator.userAgent || "")); } catch (e) { /* пуш не критичен */ }
+    }
     pushEvent({
       tone: "neutral",
       title: "Push-подписка устройства сохранена",
@@ -1168,6 +1228,13 @@ const Store = (() => {
   // воскресило бы удалённые сделки из облака или с другого устройства.
   function clearClosedHistory(which) {
     if (!canTrade()) return { ok: false, error: "Историю может очищать только аккаунт David или Yura" };
+    // R32: удаление истории ФИКСИРУЕТСЯ НА СЕРВЕРЕ — могилки серверного архива обязаны
+    // приехать на все устройства (кейс пользователя: на ПК удалено, на мобиле живёт).
+    // В серверном режиме могилки живут в серверном состоянии и никакой union их не воскресит.
+    if (serverMode()) return serverAction("clearHistory", { which }, () => clearClosedHistoryLocal(which));
+    return clearClosedHistoryLocal(which);
+  }
+  function clearClosedHistoryLocal(which) {
     const isUser = which !== "lab";
     const list = isUser ? state.userClosed : state.labClosed;
     const n = list.length;
@@ -1296,7 +1363,19 @@ const Store = (() => {
       });
   }
 
+  // R32: в серверном режиме каждое действие исполняется СЕРВЕРОМ (локально та же
+  // логика — для мгновенного UI; сервер повторит авторитарно и вернёт свой архив)
   function placeDemo(p) {
+    if (serverMode()) {
+      return serverAction("open", {
+        sym: p.sym, side: p.side, size: p.size, lev: p.lev || 1,
+        stop: p.stop, target: p.target, strategy: p.strategy || "manual", ai: p.ai || null,
+        id: p.id || null,
+      }, () => placeDemoLocal(p));
+    }
+    return placeDemoLocal(p);
+  }
+  function placeDemoLocal(p) {
     if (!canTrade()) return { ok: false, error: "Сделки может открывать только аккаунт David или Yura" };
     const p0 = state.prices[p.sym];
     if (!p0 || !p0.price) return { ok: false, error: "Цена ещё не загружена — попробуйте через секунду" };
@@ -1339,6 +1418,14 @@ const Store = (() => {
   }
 
   function closeDemo(id) {
+    if (serverMode()) {
+      const pos = state.userPositions.find((p) => p.id === id);
+      const price = pos ? ((state.prices[pos.sym] && state.prices[pos.sym].price) || pos.entry) : undefined;
+      return serverAction("close", { id, exitPrice: price, reason: "Вручную" }, () => closeDemoLocal(id));
+    }
+    return closeDemoLocal(id);
+  }
+  function closeDemoLocal(id) {
     if (!canTrade()) return { ok: false, error: "Закрывать сделки может только аккаунт David или Yura" };
     const pos = state.userPositions.find((p) => p.id === id);
     if (!pos) return { ok: false, error: "Позиция не найдена" };
@@ -1361,6 +1448,10 @@ const Store = (() => {
   }
 
   function setBalance(v) {
+    if (serverMode()) return serverAction("setBalance", { value: v }, () => setBalanceLocal(v));
+    return setBalanceLocal(v);
+  }
+  function setBalanceLocal(v) {
     state.balance = v; state.startBalance = v;
     // ввод/вывод не должен считаться результатом сессии ИИ — перебазируем
     if (state.aiAuto && state.aiSession) state.aiSession.startEquity = totalEquity();
@@ -1369,6 +1460,10 @@ const Store = (() => {
   }
 
   function resetDemo() {
+    if (serverMode()) return serverAction("resetDemo", {}, () => resetDemoLocal());
+    return resetDemoLocal();
+  }
+  function resetDemoLocal() {
     state.balance = state.startBalance;
     state.userPositions = []; state.userClosed = [];
     state.labAccounts = Engine.mkLabAccounts();
@@ -1380,10 +1475,18 @@ const Store = (() => {
     persist(); emit();
   }
 
-  function toggleAuto() { state.autoTrade = !state.autoTrade; persist(); emit(); }
+  function toggleAuto() {
+    if (serverMode()) return serverAction("toggleAuto", {}, () => toggleAutoLocal());
+    return toggleAutoLocal();
+  }
+  function toggleAutoLocal() { state.autoTrade = !state.autoTrade; persist(); emit(); }
 
   // ---------- режимы: демо / реальный рынок ----------
   function setMode(mode) {
+    if (serverMode()) return serverAction("setMode", { mode, liveConnected: Boolean(window.Live && Live.isConnected()) }, () => setModeLocal(mode));
+    return setModeLocal(mode);
+  }
+  function setModeLocal(mode) {
     if (mode === "live" && !(window.Live && Live.isConnected())) return { ok: false, error: "Сначала подключите кошелёк или ключи биржи" };
     if (state.mode === mode) return { ok: true };
     state.mode = mode;
@@ -1450,6 +1553,10 @@ const Store = (() => {
     return Math.max(1, Math.min(8, Math.round(Number(state.aiPosMode))));
   }
   function setMaxDeal(v) {
+    if (serverMode()) return serverAction("set", { key: "maxDeal", value: v }, () => setMaxDealLocal(v));
+    return setMaxDealLocal(v);
+  }
+  function setMaxDealLocal(v) {
     const n = Math.round(Number(String(v).replace(/\s/g, "").replace(",", ".")));
     if (!Number.isFinite(n) || n < 5 || n > 100000) return { ok: false, error: "Максимум одной сделки — от 5 до 100 000 ХРЮ" };
     state.maxDeal = n;
@@ -1459,6 +1566,10 @@ const Store = (() => {
     return { ok: true };
   }
   function setMaxTotal(v) {
+    if (serverMode()) return serverAction("set", { key: "maxTotal", value: v }, () => setMaxTotalLocal(v));
+    return setMaxTotalLocal(v);
+  }
+  function setMaxTotalLocal(v) {
     const n = Math.round(Number(String(v).replace(/\s/g, "").replace(",", ".")));
     const d = aiDealCap();
     if (!Number.isFinite(n) || n < d) return { ok: false, error: `Суммарный лимит не может быть меньше лимита одной сделки (${Fmt.fmtNum(d)} ХРЮ)` };
@@ -1469,6 +1580,10 @@ const Store = (() => {
     return { ok: true };
   }
   function setAiPosMode(v) {
+    if (serverMode()) return serverAction("set", { key: "aiPosMode", value: v }, () => setAiPosModeLocal(v));
+    return setAiPosModeLocal(v);
+  }
+  function setAiPosModeLocal(v) {
     if (v === "auto") {
       state.aiPosMode = "auto";
       pushEvent({ tone: "neutral", title: "Число ИИ-позиций: АВТО из лимитов", detail: `автопилот держит до ${autoMaxPos()} одновременных сделок (суммарный лимит ${Fmt.fmtNum(aiTotalCap())} ÷ лимит одной ${Fmt.fmtNum(aiDealCap())})` });
@@ -1507,6 +1622,10 @@ const Store = (() => {
     return { size, why: "ок" };
   }
   function setAiThreshold(v) {
+    if (serverMode()) return serverAction("set", { key: "aiThreshold", value: v }, () => setAiThresholdLocal(v));
+    return setAiThresholdLocal(v);
+  }
+  function setAiThresholdLocal(v) {
     const n = Math.round(Number(v));
     if (!Number.isFinite(n) || n < 5 || n > 500) return { ok: false, error: "Лимит сессии — от 5% до 500%" };
     state.aiThreshold = n;
@@ -1520,6 +1639,10 @@ const Store = (() => {
   // фитиль за стоп-линией сделку не закрывают — она ждёт цели; закрывается только
   // очевидно провальный ход. 0% возвращает классический стоп, 100%+ — очень терпеливый ИИ.
   function setFailPct(v) {
+    if (serverMode()) return serverAction("set", { key: "failPct", value: v }, () => setFailPctLocal(v));
+    return setFailPctLocal(v);
+  }
+  function setFailPctLocal(v) {
     const n = Math.round(Number(String(v).replace(/\s/g, "").replace(",", ".")));
     if (!Number.isFinite(n) || n < 0 || n > 200) return { ok: false, error: "Провальный порог — от 0 до 200% от тела сделки" };
     state.failPct = n;
@@ -1980,6 +2103,10 @@ const Store = (() => {
   }
 
   function toggleAiAuto(forceOn) {
+    if (serverMode()) return serverAction("toggleAiAuto", { forceOn: forceOn === true }, () => toggleAiAutoLocal(forceOn));
+    return toggleAiAutoLocal(forceOn);
+  }
+  function toggleAiAutoLocal(forceOn) {
     // переключаем флаг ТЕКУЩЕГО режима: демо и реальный независимы
     if (state.mode === "live") {
       const turningOn = forceOn === true ? true : !state.aiAutoLive;
@@ -2079,7 +2206,7 @@ const Store = (() => {
     //    иначе два устройства открывали бы одни и те же сделки параллельно. Защитные
     //    выходы (стопы/цели/провал/безубыток) ниже работают на ВСЕХ устройствах —
     //    их дубли схлопываются слиянием (могилки по pid + одинаковые id событий).
-    if (isAutoHost()) { try { aiAutoStep(sym, bars); } catch (e) { console.error(e); } }
+    if (!serverMode() && isAutoHost()) { try { aiAutoStep(sym, bars); } catch (e) { console.error(e); } }
 
     // 1) сигналы стратегий
     for (const strat of Engine.STRATEGIES) {
@@ -2090,7 +2217,9 @@ const Store = (() => {
       if (state.labPositions.some((p) => p.sym === sym && p.strategy === strat.id)) continue;
       lastSignalKey = key;
       state.signals = [sig, ...state.signals.filter((x) => !(x.sym === sym && x.strategy === strat.id))].slice(0, 40);
-      pushEvent({ tone: "bull", title: `${strat.name}: сигнал по ${sym} · ${sig.confidence}%`, detail: sig.note, sym, notify: { kind: "signal" } });
+      // R32: в серверном режиме событие сигнала шлёт СЕРВЕР (приедет с опросом) —
+      // локальный дубль в ленту не пишем; сам расчёт оставлен для страницы «Сигналы»
+      if (!serverMode()) pushEvent({ tone: "bull", title: `${strat.name}: сигнал по ${sym} · ${sig.confidence}%`, detail: sig.note, sym, notify: { kind: "signal" } });
 
       // 2) автоторговля лаборатории — сделка стратегии получает снапшот факторов,
       //    чтобы её закрытие обучило общий мозг ИИ (лаборатория — учебные данные).
@@ -2100,6 +2229,7 @@ const Store = (() => {
       //    а на вспышках вход откладывается тем же анти-догоном, что и у ИИ
       if (!state.autoTrade) continue;
       if (state.mode === "live") continue;
+      if (serverMode()) continue; // R32: входы лаборатории делает сервер — локально не дублируем
       if (!isAutoHost()) continue; // R31: вход лаборатории — только у исполнителя (иначе дубли позиций)
       const eq = Engine.entryQualityFromBars(bars, "лонг");
       if (!eq.ok) continue;
@@ -2178,6 +2308,13 @@ const Store = (() => {
       state.userPositions = state.userPositions.filter((p) => !userIds.has(p.id));
       state.userClosed = [...userClosedAdd, ...state.userClosed].slice(0, 300);
       state.balance += userClosedAdd.reduce((sum, c) => sum + c.size + c.pnl, 0);
+      // R32: в серверном режиме выход реплеится НА СЕРВЕР (детерминированно, по pid):
+      // сервер закроет той же логикой, могилки/union схлопнут двойные исполнения
+      if (serverMode()) {
+        for (const c of userClosedAdd) {
+          try { Server.action("close", { id: c.pid, exitPrice: c.exit, reason: c.exitReason }); } catch (e) { /* сервер закроет сам на своём тике */ }
+        }
+      }
       for (const c of userClosedAdd) learnFromClosed(c); // ИИ учится на авто-выходах (стоп/цель/флип/безубыток)
       for (const c of userClosedAdd) if (c.strategy === "ai" && (c.exitReason === "Стоп" || c.exitReason === "Провал")) noteAiStopBan(c.sym); // R28: тихий час монете (провал — тот же доказанный провал расчёта)
       for (const c of labClosedAdd) learnFromClosed(c, true); // лаборатория тоже кормит общий мозг
@@ -2318,6 +2455,8 @@ const Store = (() => {
 
   function catchUp() {
     if (!state.started || catchCtl.busy) return Promise.resolve(false);
+    // R32: сервер сам торгует каждые 2 минуты — браузерный догон не нужен
+    if (serverMode()) return Promise.resolve(false);
     if (state.degraded) return Promise.resolve(false); // нет реальных источников — симуляция уже «живёт»
     // R31: догоняет рынок ТОЛЬКО исполнитель. Пока открыто другое устройство или
     // работает Страж, пропущенный период уже проигран серверным движком — его

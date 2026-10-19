@@ -4,7 +4,7 @@
    в симуляцию, но продолжает работать (кэш отдаёт оболочку приложения). */
 "use strict";
 
-const VERSION = "xenoai-v14";
+const VERSION = "xenoai-v15";
 const CORE = [
   "./",
   "./index.html",
@@ -27,6 +27,8 @@ const CORE = [
   "./js/views-core.js",
   "./js/views-trade.js",
   "./js/auth.js",
+  "./js/backend-config.js",
+  "./js/backend.js",
   "./js/app.js",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
@@ -43,6 +45,12 @@ self.addEventListener("install", (event) => {
       Promise.all(CORE.map((url) => cache.add(new Request(url, { cache: "reload" })).catch(() => {})))
     ).then(() => self.skipWaiting())
   );
+});
+
+// R32: команда от страницы «применить новую версию немедленно» — без этого PWA
+// может неделями работать на старом service worker (кейс «на мобиле старое поведение»)
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "SKIP_WAITING") self.skipWaiting();
 });
 
 self.addEventListener("activate", (event) => {

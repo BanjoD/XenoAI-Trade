@@ -45,6 +45,31 @@ if (!/^[A-Z0-9-]{8,24}$/.test(CODE.toUpperCase())) {
 const JS_DIR = path.join(__dirname, "..", "js");
 const BRAIN_URL = "https://textdb.online/xenoai-global-brain-a7x42";
 
+// ===== R32: СТОИМ ВНИЗ, ЕСЛИ ЖИВ СЕРВЕР =====
+// С бэкенда (Cloudflare Worker + Durable Object) торговый ИИ тикает каждые 2 минуты
+// круглосуточно. Если его heartbeat свежее 12 минут — Страж не нужен: входить параллельно
+// значило бы создавать дубли сделок. URL берётся из js/backend-config.js (его пишет
+// деплой-воркфлоу), прокат может быть отключён переменной XENOAI_GUARDIAN_FORCE=1.
+async function backendActive() {
+  if (String(process.env.XENOAI_GUARDIAN_FORCE || "") === "1") return false;
+  try {
+    const cfgSrc = fs.readFileSync(path.join(JS_DIR, "backend-config.js"), "utf8");
+    const m = /url:\s*"([^"]+)"/.exec(cfgSrc);
+    if (!m || !m[1]) return false;
+    const base = m[1].replace(/\/+$/, "");
+    const r = await fetch(base + "/api/meta", { signal: AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined });
+    if (!r.ok) return false;
+    const j = await r.json();
+    if (!j || !j.ok || !j.rooms) return false;
+    const now = Date.now();
+    for (const k of Object.keys(j.rooms)) {
+      const room = j.rooms[k];
+      if (room && room.ok && room.lastTickOk && now - room.lastTickOk < 12 * 60000) return true;
+    }
+    return false;
+  } catch (e) { return false; }
+}
+
 // ---------- контекст: минимальные заглушки браузера + настоящие fetch/crypto ----------
 const mem = {}; // in-memory localStorage (состояние живёт в облаке, не здесь)
 const ctx = {
@@ -85,6 +110,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {
   const t0 = Date.now();
+  if (await backendActive()) {
+    console.log("Страж: сервер XenoAI торгует автономно (heartbeat свежий) — Страж отдыхает, чтобы не создавать дублей сделок. Следующая проверка по расписанию.");
+    process.exit(0);
+  }
   const S = Store.state;
   // рантайм стража: состояние из облака, синк на наш ключ, платформа «запущена»
   S.sync.code = CODE.toUpperCase();

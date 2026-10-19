@@ -998,7 +998,18 @@ const ViewsTrade = (() => {
       : sync.host
         ? `<b>${h.esc(sync.host.tag || "другое устройство")}</b> (аренда до ${Fmt.fmtClock(sync.host.until)})`
         : "свободно — аренду возьмёт первое включённое устройство или Страж");
-    const syncStatus = !sync ? "" : `<div class="sync-state">
+    // R32: блок сервера — видно на любом устройстве одинаково
+    const srv = (window.Server && Server.info) ? Server.info() : null;
+    const srvLastTick = srv && srv.lastOkAt ? Fmt.fmtClock(srv.lastOkAt) : null;
+    const srvBlock = (!srv || !srv.configured) ? "" : `
+      <div class="notify-sec">Сервер XenoAI · автономная торговля 24/7</div>
+      <div class="sync-state">
+        ${srv.active
+          ? `<span class="np-ok">подключён</span> · аккаунт живёт на сервере: сделки открывает и закрывает сервер каждые 2 минуты — браузер может быть выключен · состояние одно и то же с любого устройства`
+          : `<span class="text-red">не выполнен вход на сервер</span> · выйдите и войдите заново тем же логином — сервер подключится сам`}
+        <div class="num" style="margin-top:4px;font-size:11.5px;color:#8d8a94">последняя связь с сервером: ${srvLastTick || "—"}${srv.lastError ? ` · <span class="text-red">${h.esc(String(srv.lastError).slice(0, 90))}</span>` : ""} · сборка сервера: ${h.esc(srv.build || "—")}</div>
+      </div>`;
+    const syncStatus = !sync ? "" : `${srvBlock}<div class="sync-state">
         <span class="np-ok">включена · всегда</span> · код аккаунта <b class="num" id="sync-code-txt">${h.esc(sync.code || "—")}</b>
         <button class="link-btn" data-action="sync:copy">${h.icon("copy", 12)} скопировать</button>
         <div class="num" style="margin-top:4px;font-size:11.5px;color:#8d8a94">серверный аккаунт: облако — единственный источник правды, перед КАЖДОЙ записью устройство сначала сливает облако со своим состоянием (ничьих позиций больше не пропадает) · пуш: ${sync.lastPush ? Fmt.fmtClock(sync.lastPush) : "—"} · пул: ${sync.lastPull ? Fmt.fmtClock(sync.lastPull) : "—"}${sync.lastError ? ` · <span class="text-red">${h.esc(sync.lastError)}</span>` : ""}</div>

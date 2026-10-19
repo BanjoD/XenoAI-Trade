@@ -411,7 +411,9 @@ section("Исходники: контроль ключевых констант"
 
   // R31: серверный аккаунт — слияние перед каждой записью, один исполнитель, честные часы
   ok(/const merged = mergeArchives\(local, remote\);/.test(storeSrc) && !/remote\.updatedAt \|\| 0\)\) \{ syncPush/.test(storeSrc), "путь «записать облако без слияния» удалён (причина расхождения ПК/телефон)");
-  ok(/if \(isAutoHost\(\)\) \{ try \{ aiAutoStep/.test(storeSrc), "входы ИИ — только у исполнителя (серверная аренда)");
+  ok(/if \(!serverMode\(\) && isAutoHost\(\)\) \{ try \{ aiAutoStep/.test(storeSrc), "входы ИИ — только у исполнителя (R32: или у сервера — тогда локально выключены)");
+  ok(/Server\.bootstrap\(archiveAccount\(\)\)/.test(storeSrc) && /Server\.startPolling/.test(storeSrc), "R32: серверный режим — bootstrap + опрос состояния сервера");
+  ok(/serverAction\("clearHistory"/.test(storeSrc), "R32: очистка истории исполняется НА СЕРВЕРЕ");
   ok(/if \(!isAutoHost\(\)\) continue; \/\/ R31: вход лаборатории/.test(storeSrc), "входы лаборатории — только у исполнителя");
   ok(/if \(!claimHost\("устройство · догон рынка"\)\) return/.test(storeSrc), "догон рынка — только у исполнителя");
   ok(/id: "x" \+ pidOfClosed\(e\.closed\)/.test(storeSrc), "детерминированные id событий закрытия (дедуп двойных исполнений)");
@@ -426,7 +428,9 @@ section("Исходники: контроль ключевых констант"
   const notifySrc = fs.readFileSync(path.join(REPO, "js", "notify.js"), "utf8");
   ok(/pushManager\.subscribe/.test(notifySrc) && /VAPID_PUBLIC = "BEwaH/.test(notifySrc), "нативная подписка Web Push с VAPID-ключом платформы");
   ok(notifySrc.indexOf("ntfy") === -1, "ntfy полностью убран из notify.js");
-  ok(/setTimeout\(\(\) => \{ ensureSubscription/.test(notifySrc), "авто-подписка при уже выданном разрешении (ноль действий)");
+  ok(/tryEnsure\(3\)/.test(notifySrc), "авто-подписка при уже выданном разрешении (3 попытки + самозалечивание)");
+  ok(/pushHealthLoop/.test(notifySrc), "R32: цикл здоровья пуши — умершая подписка восстанавливается сама");
+  ok(/Server\.pushSub\(\{ endpoint: raw\.endpoint, keys: raw\.keys \}\)/.test(notifySrc), "R32: живая подписка перерегистрируется на сервере");
 
   const guardSrc = fs.readFileSync(path.join(REPO, "tools", "guardian.js"), "utf8");
   ok(/require\("\.\/webpush\.js"\)/.test(guardSrc), "Страж шлёт пуши через tools/webpush.js (нативный Web Push)");
@@ -441,9 +445,11 @@ section("Исходники: контроль ключевых констант"
   ok(/торговля стоит · цены заморожены/.test(viewsSrc), "честная плашка деградации в сделках");
 
   const swSrc = fs.readFileSync(path.join(REPO, "sw.js"), "utf8");
-  ok(/VERSION = "xenoai-v14"/.test(swSrc), "SW поднят до v14");
+  ok(/VERSION = "xenoai-v15"/.test(swSrc), "SW поднят до v15");
+  ok(/SKIP_WAITING/.test(swSrc), "R32: SKIP_WAITING — новая версия SW применяется сразу");
   const idx = fs.readFileSync(path.join(REPO, "index.html"), "utf8");
-  ok(idx.indexOf("v=20261035") !== -1, "кэш-версии ?v=20261035");
+  ok(idx.indexOf("v=20261036") !== -1, "кэш-версии ?v=20261036");
+  ok(idx.indexOf("js/backend.js") !== -1 && idx.indexOf("js/backend-config.js") !== -1, "R32: серверный клиент подключён в index.html");
   const yml = fs.readFileSync(path.join(REPO, ".github", "workflows", "guardian.yml"), "utf8");
   ok(yml.indexOf("npm install") === -1, "Стражу не нужны npm-зависимости (чистый Node crypto)");
 }
