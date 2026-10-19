@@ -919,11 +919,22 @@ export class AccountBrain {
         const { bars } = await this.hooks.fetchKlines(inst.pair, "15m", 120);
         if (!bars || bars.length < 10) continue;
         this.bars[sym] = bars;
-        const lastClosed = bars[bars.length - 1].openTime;
-        const isNewBar = (this.lastBarClose[sym] || 0) !== lastClosed && (now >= lastClosed + 15 * 60000);
-        this.lastBarClose[sym] = lastClosed;
+        // R40: у ВСЕХ источников каскада (Binance, MEXC, Bybit, OKX, Gate, KuCoin)
+        // ПОСЛЕДНИЙ элемент массива — формирующаяся свеча (openTime + ТФ > now).
+        // Раньше «последней закрытой» считали именно её, поэтому условие
+        // now >= openTime + 15м не выполнялось НИКОГДА: гейт новой свечи молчал →
+        // engineStep (сигналы, идеи ИИ, входы автопилота) не запускался ни разу
+        // с переезда на сервер. Работали только выходы (exitsOnly) — торговля стояла.
+        // Считаем закрытой последнюю свечу, чьё время закрытия уже прошло, и шагаем
+        // РОВНО ОДИН раз на каждое её обновление (первый скан после деплоя тоже
+        // шагает — мгновенный старт сканера без ожидания ближайшего закрытия).
+        let ci = bars.length - 1;
+        while (ci >= 0 && bars[ci].openTime + 15 * 60000 > now) ci--;
+        const closedOpen = ci >= 0 ? bars[ci].openTime : 0;
+        const isNewBar = closedOpen > 0 && closedOpen !== (this.lastBarClose[sym] || 0);
+        if (isNewBar) this.lastBarClose[sym] = closedOpen;
         // выходы проверяем каждый тик по живой цене (как в браузере);
-        // полный шаг (сигналы+входы) — только на новой свече
+        // полный шаг (сигналы+входы) — только на новой закрытой свече
         if (isNewBar) this.engineStep(sym, bars);
         else if (this.a.userPositions.some((p) => p.sym === sym)) this.exitsOnly(sym, bars, now);
       } catch (e) {

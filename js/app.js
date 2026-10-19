@@ -671,15 +671,38 @@ const App = (() => {
         const idea = (s.aiIdeas || []).find((i) => i.sym === arg);
         if (!idea || idea.res.verdict === "wait") { h.toast("error", "Идея устарела — подождите пересчёта"); break; }
         if (!Store.canTrade()) { h.toast("error", "Сделки может открывать только аккаунт David или Yura"); break; }
-        // не догонять поезд: цена ушла от расчёта больше чем на 60% риска — ждать пересчёта
+        // не догонять поезд: цена ушла от расчёта больше чем на 60% риска.
+        // R40: вместо тупика «дождитесь пересчёта» — свежий пересчёт ансамбля по
+        // живым 15м-свечам прямо здесь: подтверждает направление — открываем по
+        // свежим уровням; «wait» или снова дрейф — честно объясняем и ждём сервер.
         const curIdea = (s.prices[idea.sym] && s.prices[idea.sym].price) || idea.res.price;
         const driftIdea = Math.abs(curIdea - idea.res.price) / idea.res.price * 100;
-        if (driftIdea > (idea.res.riskPct || 1) * 0.6) { h.toast("info", "Цена ушла от расчёта", `${idea.sym}: сигнал по ${Fmt.fmtPrice(idea.res.price)}, сейчас ${Fmt.fmtPrice(curIdea)} — дождитесь пересчёта`); break; }
+        let useRes = idea.res;
+        if (driftIdea > (idea.res.riskPct || 1) * 0.6) {
+          const barsIdea = Store.getBars(idea.sym, "15м");
+          if (!barsIdea || barsIdea.length < 60) {
+            Store.ensureBars(idea.sym, "15м");
+            h.toast("info", `Собираю свежие свечи ${idea.sym}…`, "Нажмите «Открыть в демо» ещё раз через пару секунд — идея будет пересчитана по живым данным");
+            break;
+          }
+          const extraIdea = {
+            whale: null,
+            onchain: (window.WhalesDB && WhalesDB.bias) ? WhalesDB.bias(idea.sym) : null,
+            glm: (window.GLM && GLM.factor) ? GLM.factor(idea.sym) : null,
+          };
+          const fresh = Engine.aiAnalyze(idea.sym, barsIdea, s.aiBrain, (s.news && s.news.items) || [], extraIdea);
+          const freshDrift = fresh && fresh.price ? Math.abs(curIdea - fresh.price) / fresh.price * 100 : Infinity;
+          if (!fresh || fresh.verdict === "wait" || freshDrift > (fresh.riskPct || 1) * 0.6) {
+            h.toast("info", "Цена ушла от расчёта", `${idea.sym}: идея строилась по ${Fmt.fmtPrice(idea.res.price)}, сейчас ${Fmt.fmtPrice(curIdea)} — свежий пересчёт вход не подтверждает, сервер обновит идею на закрытии 15м-свечи`);
+            break;
+          }
+          useRes = fresh;
+        }
         const szSc = Store.aiSizeCalc();
         if (szSc.size <= 0) { h.toast("error", "Размер не проходит по лимитам", `${szSc.why} — поднимите лимиты или пополните счёт`); break; }
-        const ideaOut = Store.placeDemo({ sym: idea.sym, side: idea.res.verdict, size: szSc.size, lev: 1, stop: idea.res.stop, target: idea.res.target, strategy: "ai", ai: { confidence: idea.res.confidence, note: idea.res.note, factors: idea.res.factors, score: idea.res.score } });
+        const ideaOut = Store.placeDemo({ sym: idea.sym, side: useRes.verdict, size: szSc.size, lev: 1, stop: useRes.stop, target: useRes.target, strategy: "ai", ai: { confidence: useRes.confidence, note: useRes.note, factors: useRes.factors, score: useRes.score } });
         if (!ideaOut.ok) { h.toast("error", ideaOut.error); break; }
-        h.toast("success", `Идея ИИ взята: ${idea.sym} ${idea.res.verdict}`, `${Fmt.fmtNum(szSc.size)} ХРЮ · уверенность ${idea.res.confidence}%`);
+        h.toast("success", `Идея ИИ взята: ${idea.sym} ${useRes.verdict}`, `${Fmt.fmtNum(szSc.size)} ХРЮ · уверенность ${useRes.confidence}%${useRes !== idea.res ? " · по свежему пересчёту" : ""}`);
         break;
       }
 

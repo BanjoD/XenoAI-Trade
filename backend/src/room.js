@@ -20,7 +20,7 @@ const TEXTDB_BASE = "https://textdb.online/";
 const TICK_MS = 2 * 60000;       // тик ИИ каждые 2 минуты
 const NEWS_MS = 10 * 60000;      // новостная лента раз в 10 минут
 const SCAN_PER_TICK = 8;         // монет в скане за тик (ротация по кругу ≈ каждые 6-7 мин на монету)
-export const BUILD = "r32";
+export const BUILD = "r40";
 
 const PASSWORDS = { david: "ETH123aAgo", yura: "BTCmyB671" };
 

@@ -5,6 +5,9 @@
 name = "xenoai-trade-backend"
 main = "src/router.js"
 compatibility_date = "2026-09-01"
+# ВАЖНО: на новых аккаунтах Cloudflare production-URL workers.dev по умолчанию
+# ВЫКЛЮЧЕН (в дашборде видно «Previews Only») — включаем явно при каждом деплое.
+workers_dev = true
 
 [triggers]
 crons = ["*/2 * * * *"]   # страховочный тик автономной торговли (основной — alarm DO)
