@@ -285,10 +285,25 @@ const ViewsTrade = (() => {
       </div>
       <div class="ai-limit-note">Одновременных ИИ-позиций: <b>${effPos}</b>${posMode === "auto" ? ` — авто из лимитов (${Fmt.fmtNum(totalCap)} ÷ ${Fmt.fmtNum(dealCap)})` : " — ручной лимит"} · свободно по суммарному лимиту: ${Fmt.fmtNum(Math.round(remainV))} ХРЮ (≈ $${Fmt.fmtNum(Math.round(remainV))}). Лимиты действуют на все сделки счёта — ИИ, сигналы и ручные.</div>`;
 
+    // ---- R29 провальный порог: тело + N% — единственная точка авто-закрытия в минусе ----
+    const failPct = s.failPct == null ? 50 : s.failPct;
+    const failPresets = [0, 25, 50, 75, 100, 150];
+    const failHtml = `
+      <div class="ai-limit-row">
+        <span class="lbl">${h.icon("shield", 12)} провал: тело +</span>
+        <div class="limit-chips">${failPresets.map((v) => `<button class="limit-chip num ${failPct === v ? "active" : ""}" data-action="ai:fail" data-arg="${v}" title="${v === 0 ? "Классический режим: закрывать сразу за стоп-линией (старое поведение)" : "Закрывать в минусе только при ходе глубже стопа ещё на " + v + "% от тела"}">${v}%</button>`).join("")}</div>
+        <span class="custom-wrap">
+          <input id="ai-fail-input" class="inp num" data-role="ai-fail" inputmode="numeric" placeholder="${failPct}" value="" title="Свой провальный порог, % от тела сделки (0–200)">
+          <span class="pct">%</span>
+          <button class="limit-apply" data-action="ai:fail-apply" title="Применить свой провальный порог">OK</button>
+        </span>
+      </div>
+      <div class="ai-limit-note">«Тело» сделки — плановый риск: расстояние от входа до стопа. Убыток ниже тела — это шум и временный тренд: ИИ такие сделки НЕ закрывает и ждёт цели (2R). Авто-закрытие в минусе одно: ход против сделки глубже тела ещё на ${failPct}% (при телах ~1% это −1,5% от входа). Трейлинг в плюсе, безубыток и цель работают как раньше — продаём только в плюс. Порог синхронизируется в облако: Страж закрывает по тем же правилам.</div>`;
+
     // ---- мини-статистика памяти ИИ + статус GLM-аналитика ----
     const brain = s.aiBrain || {};
     const wr = brain.trades ? Math.round((brain.wins / brain.trades) * 100) : null;
-    const brainMini = `<div class="ai-brain-mini num">${h.icon("cpu", 11)} опыт: ${brain.trades || 0} сделок${wr != null ? ` · винрейт ${wr}%` : ""} · порог входа ${brain.confThreshold || 76}% · память ${brain.weights ? "адаптирована" : "базовая"}</div>`;
+    const brainMini = `<div class="ai-brain-mini num">${h.icon("cpu", 11)} опыт: ${brain.trades || 0} сделок${wr != null ? ` · винрейт ${wr}%` : ""} · порог входа ${brain.confThreshold || 74}% (всё выше открывает сам) · память ${brain.weights ? "адаптирована" : "базовая"}</div>`;
     const glmSt = window.GLM ? GLM.status() : { status: "not-configured" };
     const glmOn = window.GLM && GLM.enabled();
     const glmTxt = !glmOn
@@ -312,9 +327,9 @@ const ViewsTrade = (() => {
         <div class="ai-help">ИИ взвешивает 13 факторов: тренд, RSI, MACD, Боллинджера, Ишимоку, объём, импульс,
         новостной фон, ADX (силу тренда), стохастик, старший таймфрейм 1ч, поток китов и GLM-аналитика. Сам выбирает направление,
         стоп и цель. Защита в несколько слоёв: скам-фильтр, новостные риски, гварды волатильности и вспышек, запрет входа против
-        явного тренда 1ч, тайм-аут 4 часа по монете после стопа, безубыток с +1R, пауза после серии минусов и авто-стоп сессии
-        ±${th}%. Порог входа калибруется по последним сделкам и при долгом простое сам снижается — автопилот не «замерзает».
-        С каждой закрытой сделкой (вашей или лабораторной) ИИ корректирует веса. ${live ? "В реальном режиме вердикт подскажет вход — ордер отправите кнопкой ниже." : "Автопилот может открывать и флипать сделки сам."}</div>;`;
+        явного тренда 1ч, тайм-аут 4 часа по монете после провала, безубыток с +1R, пауза после серии минусов и авто-стоп сессии
+        ±${th}%. В минусе ИИ терпелив: закрывает сделку только когда убыток превысил «тело» + ${s.failPct == null ? 50 : s.failPct}% — временный откат не повод продавать, ждём цель.
+        С каждой закрытой сделкой (вашей или лабораторной) ИИ корректирует веса. ${live ? "В реальном режиме вердикт подскажет вход — ордер отправите кнопкой ниже." : "Автопилот может открывать и флипать сделки сам."}</div>`;
     } else {
       const r = fresh.res;
       if (r.verdict === "wait") {
@@ -339,8 +354,11 @@ const ViewsTrade = (() => {
           <div class="ai-conf"><i style="width:${r.confidence}%"></i></div>
           <div class="ai-levels num">
             <div><div class="k">вход</div><div>${fmtPrice(r.price)}</div></div>
-            <div><div class="k">стоп −${r.riskPct.toFixed(1)}%</div><div class="text-red">${fmtPrice(r.stop)}</div></div>
+            <div><div class="k">стоп-линия −${r.riskPct.toFixed(1)}%</div><div class="text-red">${fmtPrice(r.stop)}</div></div>
             <div><div class="k">цель +${r.targetPct.toFixed(1)}%</div><div class="text-green">${fmtPrice(r.target)}</div></div>
+          </div>
+          <div class="ai-levels num" style="margin-top:-6px">
+            <div style="grid-column:1/-1"><div class="k">провал закроется за (тело +${S().failPct == null ? 50 : S().failPct}%) · дальше только цель</div><div class="text-red">${fmtPrice(Engine.failLineOf({ side: r.verdict, entry: r.price, stop: r.stop }, S().failPct == null ? 50 : S().failPct))}</div></div>
           </div>
           <div class="ai-factors">${factorRows}</div>
           ${live
@@ -353,7 +371,7 @@ const ViewsTrade = (() => {
       }
     }
 
-    return `<div class="ai-block">${head}${pauseHtml}${sessionHtml}${live ? "" : limitHtml}${live ? "" : limitsHtml}${stopHtml}${brainMini}${glmRow}${body}</div>`;
+    return `<div class="ai-block">${head}${pauseHtml}${sessionHtml}${live ? "" : limitHtml}${live ? "" : limitsHtml}${live ? "" : failHtml}${stopHtml}${brainMini}${glmRow}${body}</div>`;
   }
 
   // ================= МОДАЛКА GLM-АНАЛИТИКА (13-й фактор ансамбля) =================
@@ -1122,6 +1140,24 @@ const ViewsTrade = (() => {
       nrRow("notify:opt", "quiet", "Тишина на экране", "не беспокоить, когда приложение открыто на переднем плане", st.quiet),
     ].join("");
 
+    // ---- push на смартфон через ntfy: канал, работающий при ЗАКРЫТОМ приложении ----
+    const ntfyTopic = Notify.ntfyTopic();
+    const ntfyHtml = `
+      <div class="notify-sec">Push на смартфон · даже при закрытом приложении</div>
+      <div class="notify-install">
+        Браузерные уведомления приходят, пока приложение открыто или висит в фоне — когда Android/iOS выгружает его из памяти, присылать некому (у статичного сайта нет своего push-сервера). Канал <b>ntfy</b> решает это без своего сервера: <b>Страж (GitHub Actions, каждые 15 минут)</b> публикует события сделок — входы, цели, провалы, флипы, паузы — в вашу личную тему, и телефон получает их обычными push. Два шага: 1) установите приложение ntfy (Google Play / App Store) или откройте ntfy.sh в браузере и разрешите уведомления; 2) подпишитесь на приватную тему ниже. Готово — дальше всё идёт само.
+      </div>
+      ${ntfyTopic
+        ? `<div class="ai-limit-row" style="flex-wrap:wrap;gap:8px">
+            <span class="lbl">${h.icon("radio", 12)} ваша тема</span>
+            <code class="num" style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:6px 10px;font-size:12.5px">${h.esc(ntfyTopic)}</code>
+            <button class="btn-ghost" data-action="notify:ntfy-copy" title="Скопировать имя темы для подписки в ntfy">${h.icon("copy", 12)} копировать</button>
+            <a class="btn-ghost" href="https://ntfy.sh/${encodeURIComponent(ntfyTopic)}" target="_blank" rel="noopener" style="text-decoration:none">${h.icon("zap", 12)} открыть в ntfy</a>
+            <button class="btn-ghost" data-action="notify:ntfy-test" title="Отправить проверочное сообщение в тему — оно придёт на все подписанные устройства">${h.icon("bell", 12)} проверочный пуш</button>
+          </div>
+          <div class="ai-limit-note">Тема выведена из кода синхронизации аккаунта — отдельный секрет заводить не нужно. Пока приложение открыто, системные уведомления из блока выше продолжают приходить как раньше: ntfy — это второй, автономный канал для закрытого приложения.</div>`
+        : `<div class="ai-limit-note">Тема появится, когда у аккаунта будет код синхронизации (Кабинет → «Синхронизация устройств»).</div>`}`;
+
     const actionsHtml = `
       <div class="notify-actions">
         <button class="btn-ghost" data-action="notify:test" ${st.on && perm === "granted" ? "" : "disabled"} title="Показать пробное системное уведомление">${h.icon("radio", 13)} Проверить уведомление</button>
@@ -1148,6 +1184,7 @@ const ViewsTrade = (() => {
         ${filterHtml}
         <div class="notify-sec">Режим доставки</div>
         ${extraHtml}
+        ${ntfyHtml}
         ${actionsHtml}
       </div>
     </div>`;

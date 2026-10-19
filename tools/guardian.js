@@ -105,13 +105,53 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // 3) ДОГОН РЫНКА тем же движком, что и в браузере: стопы/цели/безубыток/входы/флипы
   //    по реальным 15-минутным свечам за период отсутствия (до ~10 суток покрытия)
+  const evBefore = new Set((S.events || []).map((e) => e.id)); // снимок до прогона: новыми считаем только события этого запуска
   const caught = await Store.catchUp();
   const recent = S.userClosed.slice(0, 5).map((c) => `  ${c.sym} ${c.side} ${c.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(c.pnl)))} ХРЮ (${c.exitReason})`);
   console.log(`Страж: догон рынка ${caught ? "выполнен" : "не потребовался"} · последних закрытий: ${recent.length ? "\n" + recent.join("\n") : "0"} · позиций в рынке: ${S.userPositions.length} · эквити ${Fmt.fmtNum(Math.round(Store.totalEquity()))} ХРЮ`);
 
-  // 4) сохранить результат в облако (архив + мозг, если учился)
+  // 4) PUSH НА СМАРТФОН (ntfy): события этого прогона улетают в приватную тему
+  //    xenoai-<код синхронизации> — телефон получает их как обычные push даже тогда,
+  //    когда PWA полностью закрыт и системные уведомления браузера не работают.
+  //    Тема выводится из кода синхронизации (он и так лежит в Secrets) — отдельный
+  //    секрет не нужен; сбой канала НЕ роняет прогон (торговля важнее уведомлений).
+  //    Публикация — JSON на корень ntfy; все не-ASCII символы экранируются в \uXXXX:
+  //    тело остаётся чистым ASCII (валидный JSON в любой точке маршрута), а сервер
+  //    декодирует его обратно в кириллицу — заголовки HTTP не принимают UTF-8, а
+  //    «сырой» UTF-8 в JSON-теле часть маршрутов режет (проверено: 400 invalid JSON).
+  const NTIFY_TAGS = { bull: "chart_with_upwards_trend", bear: "chart_with_downwards_trend", neutral: "robot" };
+  const jsonSafe = (s) => String(s).replace(/[^\x20-\x7E]/g, (ch) => "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"));
+  let ntfyOk = 0, ntfyFail = 0;
+  const freshEvents = (S.events || []).filter((e) => e && e.id && !evBefore.has(e.id)).slice(0, 20); // потолок 20: лимиты бесплатного ntfy.sh
+  if (freshEvents.length) {
+    const topic = "xenoai-" + String(CODE).toUpperCase().replace(/[^A-Z0-9_-]/g, "");
+    for (const ev of freshEvents) {
+      try {
+        const body = jsonSafe(JSON.stringify({
+          topic,
+          title: String(ev.title || "XenoAI Trade").slice(0, 200),
+          message: String(ev.detail || "").slice(0, 500),
+          tags: [NTIFY_TAGS[ev.tone] || "robot"],
+          priority: ev.tone === "bear" ? "high" : "default",
+        }));
+        const ctl = new AbortController();
+        const to = setTimeout(() => ctl.abort(), 8000);
+        const res = await fetch("https://ntfy.sh/", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+          signal: ctl.signal,
+        });
+        clearTimeout(to);
+        if (res.ok) ntfyOk++; else ntfyFail++;
+      } catch (e) { ntfyFail++; }
+    }
+    console.log(`Страж: push в ntfy (${topic}) — отправлено ${ntfyOk}, не доставлено ${ntfyFail}${ntfyFail ? " (канал не мешает торговле)" : ""}`);
+  }
+
+  // 5) сохранить результат в облако (архив + мозг, если учился)
   await Store.syncPush("seed");
-  await sleep(5000); // даём отработать отложенному пушу мозга (debounce 4с)
+  await sleep(13000); // даём отработать пушу мозга (debounce 4с + защитное чтение облака + запись)
   console.log(`Страж: результат сохранён в облако (${((Date.now() - t0) / 1000).toFixed(1)} с) · след. прогон по расписанию`);
   process.exit(0);
 })().catch((e) => {

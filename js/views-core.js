@@ -164,7 +164,7 @@ const Views = (() => {
       <div class="brain-stats num">
         <div><div class="k">сделок изучено (все пользователи)</div><div>${b.trades || 0}</div></div>
         <div><div class="k">винрейт ИИ-сигналов</div><div>${wr != null ? wr + "%" : "—"}</div></div>
-        <div><div class="k">порог входа</div><div>${b.confThreshold || 76}%</div></div>
+        <div><div class="k">порог входа</div><div>${b.confThreshold || 74}%</div></div>
         <div><div class="k">веса</div><div>${b.weights ? "адаптивные" : "базовые"}</div></div>
       </div>
       ${weightRows}
@@ -709,12 +709,12 @@ const Views = (() => {
           <div><div class="k">быстрый рынок</div><div class="v text-green">${fmtWait(etaT ? etaT.fast : NaN)}</div></div>
           <div><div class="k">средняя скорость</div><div class="v">${fmtWait(etaT ? etaT.mid : NaN)}</div></div>
           <div><div class="k">вялый рынок</div><div class="v">${fmtWait(etaT ? etaT.slow : NaN)}</div></div>
-          <div><div class="k">до стопа</div><div class="v text-red">−${distS.toFixed(1)}%</div></div>
+          <div><div class="k">до стоп-линии</div><div class="v text-red">−${distS.toFixed(1)}%</div></div>
         </div>
-        <div class="ai-limit-note">Оценка — по среднему ходу цены за 15-минутный бар за последние 60 баров. Рынок не идёт по прямой: сначала цель может «покачать» против входа. Уровни: вход ${Fmt.fmtPrice(entry)} · текущая ${Fmt.fmtPrice(price)} · стоп ${Fmt.fmtPrice(stop)} · цель ${Fmt.fmtPrice(target)}.</div>
+        <div class="ai-limit-note">Оценка — по среднему ходу цены за 15-минутный бар за последние 60 баров. Рынок не идёт по прямой: сначала цель может «покачать» против входа. Уровни: вход ${Fmt.fmtPrice(entry)} · текущая ${Fmt.fmtPrice(price)} · стоп-линия ${Fmt.fmtPrice(stop)} (предупреждение — сама сделку не закрывает) · провал ${Fmt.fmtPrice(window.Engine ? Engine.failLineOf({ side, entry, stop }, (window.Store && Store.state.failPct) || 50) : stop)} (тело +N% — единственный выход в минусе) · цель ${Fmt.fmtPrice(target)}.</div>
 
         <div class="notify-sec">Опыт ИИ и новостной фон</div>
-        <div class="fc-box num">${st ? `по ${sym}: ${st.n} сделок · винрейт ${stWr}% · серия ${st.streak > 0 ? "+" + st.streak : st.streak}` : `по ${sym} сделок пока не было — опыт нулевой`}${wr != null ? ` · общий опыт: ${brain.trades} сделок, винрейт ${wr}% · порог входа ${brain.confThreshold || 76}%` : ""}<br><span style="color:#a99bb5">новости: ${h.esc(newsLine)}</span></div>
+        <div class="fc-box num">${st ? `по ${sym}: ${st.n} сделок · винрейт ${stWr}% · серия ${st.streak > 0 ? "+" + st.streak : st.streak}` : `по ${sym} сделок пока не было — опыт нулевой`}${wr != null ? ` · общий опыт: ${brain.trades} сделок, винрейт ${wr}% · порог входа ${brain.confThreshold || 74}%` : ""}<br><span style="color:#a99bb5">новости: ${h.esc(newsLine)}</span></div>
 
         <div class="notify-sec">Краткий разбор логики</div>
         <div class="fc-summary">${summary}</div>

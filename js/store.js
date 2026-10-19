@@ -48,6 +48,7 @@ const Store = (() => {
     aiSession: null,    // сессия автопилота: { startEquity, openedAt } — база для авто-стопа ±лимит
     aiStop: null,       // причина авто-стопа сессии: { reason: profit|loss, pct, ts, threshold, closed }
     aiThreshold: 50,    // лимит сессии ИИ, % от базы: +50% профита или −50% просадки → стоп (настраивается)
+    failPct: 50,        // R29 «провальный порог», % от тела: авто-закрытие в минусе ТОЛЬКО когда ход против сделки глубже тела ещё на N% (0..200)
     aiMaxPos: 5,        // ручной максимум одновременных ИИ-позиций (1..8; работает в режиме "вручную")
     aiPosMode: "auto",  // кто задаёт число одновременных ИИ-позиций: "auto" (из лимитов) или 1..8
     maxDeal: 1000,      // максимальная сумма ОДНОЙ сделки, ХРЮ (≈ $) — действует на все сделки счёта
@@ -74,7 +75,7 @@ const Store = (() => {
       weights: null,       // null → базовые Engine.AI_BASE_WEIGHTS; далее — адаптивные
       rel: {},             // надёжность фактора (множитель веса) 0.55..1.5, старт 1
       symStats: {},        // sym → { n, wins, streak, avgPct } — опыт по монетам
-      confThreshold: 76,   // динамический порог входа автопилота (калибруется результатами)
+      confThreshold: 74,   // динамический порог входа автопилота (калибруется результатами; база 74 — запрос пользователя: всё выше 74% открывается само)
       trades: 0, wins: 0, losses: 0,
       lessons: [],         // что ИИ вынес из сделок (лента выводов)
       wFlags: {},          // защита уроков от повторов
@@ -104,11 +105,12 @@ const Store = (() => {
     if (!Number.isFinite(br.trades) || br.trades < 0) { br.trades = 0; br.wins = 0; br.losses = 0; }
     if (!Number.isFinite(br.wins) || br.wins < 0) br.wins = 0;
     if (!Number.isFinite(br.losses) || br.losses < 0) br.losses = 0;
-    if (!Number.isFinite(br.confThreshold)) br.confThreshold = 76;
-    // R28: потолок 84 вместо 88 — при 88 уверенность ансамбля почти недостижима
-    // (нужно почти единогласие факторов) и автопилот замерает; 84 остаётся строгим,
-    // но проходимым. Старые значения 85–88 мягко сжимаются сюда при загрузке.
-    br.confThreshold = Math.max(70, Math.min(84, Math.round(br.confThreshold)));
+    if (!Number.isFinite(br.confThreshold)) br.confThreshold = 74;
+    // R29: диапазон 70..80 (было 70..84). Потолок 80: истории серии минусов (кейс R29:
+    // 12 стопов за вечер) калибровка задирала порог до 84 — уверенность ансамбля выше
+    // 84 почти недостижима, и автопилот замерал («открывает очень редко»). 80 остаётся
+    // строгим, но проходимым; старые значения 81–84 мягко сжимаются сюда при загрузке.
+    br.confThreshold = Math.max(70, Math.min(80, Math.round(br.confThreshold)));
     return br;
   }
 
@@ -178,13 +180,35 @@ const Store = (() => {
     if (brainSync.busy) { brainSync.pending = true; return; }
     if (!budgetTake()) return; // дневной лимит облака: мозг уже на устройстве, уедет при следующем окне
     brainSync.busy = true;
-    // POST вместо GET: мозг с большим symStats не влезает в URL, а POST /update держит 200 000 символов
-    const body = "key=" + encodeURIComponent(BRAIN_CLOUD_KEY) + "&value=" + encodeURIComponent(JSON.stringify(state.aiBrain));
-    fetchT(SYNC_UPDATE_URL, 9000, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body })
-      .then((r) => { if (!r.ok) throw new Error("push " + r.status); return r.json().catch(() => ({})); })
-      .then((j) => { if (j && j.status === 0) throw new Error("облако отклонило запись"); brainSync.lastOkAt = Date.now(); brainSync.lastPushAt = Date.now(); brainSync.mode = "облако"; })
-      .catch(() => { brainSync.mode = brainSync.lastOkAt ? "облако" : "локально (нет сети)"; })
-      .then(() => { brainSync.busy = false; if (brainSync.pending) { brainSync.pending = false; setTimeout(brainPush, 2000); } });
+    // ЗАЩИТА ОТ ЗАТИРАНИЯ (R29): перед записью сверяемся с облаком. Если там мозг
+    // опытнее (пока у нас не было сети, другой пользователь/Страж обучил общий мозг
+    // на своих сделках), сначала вливаем его в локальный — глобальная память никогда
+    // не откатывается назад, даже при сбое сетевого чтения на старте.
+    fetchT(BRAIN_READ_URL, 7000)
+      .then((r) => r.text())
+      .then((txt) => {
+        txt = (txt || "").trim();
+        if (txt) {
+          try {
+            const remote = normalizeBrain(JSON.parse(txt));
+            if (remote.trades > (state.aiBrain.trades || 0)) {
+              state.aiBrain = mergeBrains(state.aiBrain, remote) || state.aiBrain;
+              saveGlobalBrainLocal();
+            }
+          } catch (e) { /* пусто или битый ответ — пишем то, что есть */ }
+        }
+      })
+      .catch(() => { /* облако не ответило на чтение — запись всё равно пробуем */ })
+      .then(() => {
+        // POST вместо GET: мозг с большим symStats не влезает в URL, а POST /update держит 200 000 символов
+        const body = "key=" + encodeURIComponent(BRAIN_CLOUD_KEY) + "&value=" + encodeURIComponent(JSON.stringify(state.aiBrain));
+        return fetchT(SYNC_UPDATE_URL, 9000, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body })
+          .then((r) => { if (!r.ok) throw new Error("push " + r.status); return r.json().catch(() => ({})); })
+          .then((j) => { if (j && j.status === 0) throw new Error("облако отклонило запись"); brainSync.lastOkAt = Date.now(); brainSync.lastPushAt = Date.now(); brainSync.mode = "облако"; })
+          .catch(() => { brainSync.mode = brainSync.lastOkAt ? "облако" : "локально (нет сети)"; });
+      })
+      .then(() => { brainSync.busy = false; if (brainSync.pending) { brainSync.pending = false; setTimeout(brainPush, 2000); } })
+      .catch(() => { brainSync.busy = false; });
   }
   let brainPushTimer = null;
   function scheduleBrainPush() {
@@ -319,6 +343,7 @@ const Store = (() => {
       events: s.events.slice(0, 80), autoTrade: s.autoTrade, labAutoMigrated: true, equityHist: s.equityHist.slice(-300),
       mode: s.mode, aiAuto: s.aiAuto, aiAutoLive: s.aiAutoLive, liveOrders: s.liveOrders.slice(0, 50),
       aiSession: s.aiSession, aiStop: s.aiStop, aiThreshold: s.aiThreshold, aiMaxPos: s.aiMaxPos,
+      failPct: s.failPct, // провальный порог едет в облако: Страж закрывает по тем же правилам
       maxDeal: s.maxDeal, maxTotal: s.maxTotal, aiPosMode: s.aiPosMode,
       lastCatchUp: s.lastCatchUp, lastScanAt: s.lastScanAt,
       aiCooldownUntil: s.aiCooldownUntil || 0, aiCooldownSeen: s.aiCooldownSeen || 0,
@@ -377,6 +402,7 @@ const Store = (() => {
     if (d.aiSession && typeof d.aiSession.startEquity === "number") state.aiSession = d.aiSession;
     if (d.aiStop && (d.aiStop.reason === "profit" || d.aiStop.reason === "loss")) state.aiStop = d.aiStop;
     if (typeof d.aiThreshold === "number" && d.aiThreshold >= 5 && d.aiThreshold <= 500) state.aiThreshold = d.aiThreshold;
+    if (typeof d.failPct === "number" && d.failPct >= 0 && d.failPct <= 200) state.failPct = d.failPct;
     if (typeof d.aiMaxPos === "number" && d.aiMaxPos >= 1 && d.aiMaxPos <= 8) state.aiMaxPos = d.aiMaxPos;
     if (typeof d.maxDeal === "number" && d.maxDeal >= 5 && d.maxDeal <= 100000) state.maxDeal = d.maxDeal;
     if (typeof d.maxTotal === "number" && d.maxTotal >= 5 && d.maxTotal <= 1000000) state.maxTotal = d.maxTotal;
@@ -467,6 +493,7 @@ const Store = (() => {
     state.aiIdeas = []; state.liveOrders = [];
     state.aiBrain = defaultBrain(); state.aiSession = null; state.aiStop = null;
     state.aiThreshold = 50; // дефолт до загрузки персист-данных пользователя
+    state.failPct = 50;
     state.aiMaxPos = 5;
     state.aiPosMode = "auto"; state.maxDeal = 1000; state.maxTotal = 5000;
     state.aiAutoLive = false; // в реальном режиме автопилот всегда стартует выключенным
@@ -1186,6 +1213,25 @@ const Store = (() => {
     persist(); emit();
     return { ok: true };
   }
+
+  // R29 «провальный порог»: авто-закрытие в минусе ТОЛЬКО когда ход против сделки
+  // превысил тело (плановый риск) ещё на N%. 50% по умолчанию: временный откат и
+  // фитиль за стоп-линией сделку не закрывают — она ждёт цели; закрывается только
+  // очевидно провальный ход. 0% возвращает классический стоп, 100%+ — очень терпеливый ИИ.
+  function setFailPct(v) {
+    const n = Math.round(Number(String(v).replace(/\s/g, "").replace(",", ".")));
+    if (!Number.isFinite(n) || n < 0 || n > 200) return { ok: false, error: "Провальный порог — от 0 до 200% от тела сделки" };
+    state.failPct = n;
+    pushEvent({
+      tone: "neutral",
+      title: `Провальный порог изменён: тело +${n}%`,
+      detail: n === 0
+        ? "классический режим: сделка закрывается сразу за стоп-линией (старое поведение)"
+        : `сделка в минусе живёт и ждёт цель; авто-закрытие только когда ход против неё глубже стопа ещё на ${n}% от тела · трейлинг в плюсе и цели работают как раньше · правило действует и в Страже (синхронизируется в облако)`,
+    });
+    persist(); emit();
+    return { ok: true };
+  }
   function scamFilter(sym) {
     const p = state.prices[sym];
     if (!p || !p.price) return { ok: false, why: "нет цены" };
@@ -1422,10 +1468,10 @@ const Store = (() => {
       }
       if (win.length >= 6) {
         const wrW = win.reduce((a, b) => a + b, 0) / win.length;
-        if (wrW < 0.4 && brain.confThreshold < 84) {
+        if (wrW < 0.4 && brain.confThreshold < 80) {
           brain.confThreshold++;
           pushLesson(brain, `поднял порог входа до ${brain.confThreshold}%: в последнем окне сделок профитов меньше 40%`);
-        } else if (wrW >= 0.6 && brain.confThreshold > 76) {
+        } else if (wrW >= 0.6 && brain.confThreshold > 74) {
           brain.confThreshold--;
           pushLesson(brain, `снизил порог входа до ${brain.confThreshold}%: качество последних сделок хорошее`);
         }
@@ -1544,7 +1590,7 @@ const Store = (() => {
 
     const aiPos = state.userPositions.find((p) => p.sym === sym && p.strategy === "ai");
     const aiCount = state.userPositions.filter((p) => p.strategy === "ai").length;
-    const thr = brain.confThreshold || 76;
+    const thr = brain.confThreshold || 74;
     const effConf = res.confidence + symBias(sym); // уверенность с поправкой на опыт монеты
 
     // флип: ИИ сам считает нужным развернуться (спот: продажа/выход в кэш).
@@ -1601,24 +1647,25 @@ const Store = (() => {
     }
     if (Date.now() < (state.aiCooldownUntil || 0)) return;
 
-    // R28: АНТИ-ЗАМОРОЗКА порога входа. Порог, задранный плохой историей (раньше — навсегда:
-    // расти мог, опускаться — только после серии профитов, которых нет без входов), теперь
-    // снижается сам при простое: если автопилот включён, но НЕ открывал сделок больше 24 часов,
-    // раз в 4 часа порог аккуратно опускается на 2 пункта до базовых 76. Торговля возобновляется,
+    // R28: АНТИ-ЗАМОРОЗКА порога входа. Порог, задранный плохой историей, теперь снижается
+    // сам при простое: если автопилот включён, но НЕ открывал сделок больше 8 часов, раз в
+    // 2 часа порог аккуратно опускается на 2 пункта до базовых 74 (запрос пользователя:
+    // уверенность выше 74% — вход открывается сам). Торговля возобновляется быстро,
     // а калибровка на окне сделок дальше ведёт порог честно.
-    const thrNow = brain.confThreshold || 76;
-    if (thrNow > 76 && (state.aiLastEntryTs || 0) > 0 && Date.now() - state.aiLastEntryTs > 24 * 3600e3 && Date.now() - (state.aiRelaxAt || 0) > 4 * 3600e3) {
-      brain.confThreshold = Math.max(76, thrNow - 2);
+    const thrNow = brain.confThreshold || 74;
+    if (thrNow > 74 && (state.aiLastEntryTs || 0) > 0 && Date.now() - state.aiLastEntryTs > 8 * 3600e3 && Date.now() - (state.aiRelaxAt || 0) > 2 * 3600e3) {
+      brain.confThreshold = Math.max(74, thrNow - 2);
       state.aiRelaxAt = Date.now();
       pushLesson(brain, `долго без новых входов (${Math.round((Date.now() - state.aiLastEntryTs) / 3600e3)} ч) — снизил порог входа до ${brain.confThreshold}%: строгий фильтр не должен замораживать торговлю`);
       persist();
     }
 
     // вход: уверенность ≥ обученного порога + факторы односторонни + все гварды + лимиты позиций и сумм.
-    // РАЗГОНКА ВХОДОВ: не чаще одного нового входа автопилота в 8 минут — иначе один общий
-    // импульс рынка набивал портфель одинаковыми лонгами, и один откат выбивал стопы
-    // ВСЕГО портфеля разом (каскад минусов R27: 12 лонгов стопом за вечер)
-    if (Date.now() - (state._aiLastEntryAt || 0) < 8 * 60000) return;
+    // РАЗГОНКА ВХОДОВ (ослаблена R29): не чаще одного нового входа автопилота в 4 минуты —
+    // разнесённые во времени входы не дают одному общему импульсу рынка набить портфель
+    // одинаковыми лонгами, но при этом автопилот успевает набрать позицию в рамках лимитов
+    // (раньше окно было 8 минут — пользователь просил торговать активнее, «да побольше»)
+    if (Date.now() - (state._aiLastEntryAt || 0) < 4 * 60000) return;
     if (!aiPos && res.verdict !== "wait" && effConf >= thr && (res.agreeShare == null || res.agreeShare >= 0.55) && aiCount < effMaxPos()) {
       if (!guard.ok || !rg.ok) return;
       if (!heatGuard().ok) return;
@@ -1762,7 +1809,7 @@ const Store = (() => {
     const exits = [];
     for (const p of state.labPositions) {
       if (p.sym !== sym) continue;
-      const ex = Engine.evalExit(p, bars, price);
+      const ex = Engine.evalExit(p, bars, price, state.failPct);
       if (ex) exits.push({ pos: p, closed: Engine.closeTrade(p, ex.price, ex.reason) });
     }
     for (const p of state.userPositions) {
@@ -1787,8 +1834,25 @@ const Store = (() => {
           }
         }
       }
-      const ex = Engine.evalExit(p, bars, price);
+      const ex = Engine.evalExit(p, bars, price, state.failPct);
       if (ex) exits.push({ pos: p, closed: Engine.closeTrade(p, ex.price, ex.reason) });
+      else if (p.owner === "user" && Engine.behindStopLine(p, price)) {
+        // R29 предупреждение «ИИ держит позицию»: цена за стоп-линией, но до провального
+        // уровня ещё далеко — честно показываем это вместо тихого ожидания стопа.
+        // Один раз на «нырок»: флаг сбрасывается, когда цена возвращается за стоп-линию.
+        if (!p.stopWarned) {
+          p.stopWarned = true;
+          const fl = Engine.failLineOf(p, state.failPct);
+          pushEvent({
+            tone: "bear",
+            title: `${p.strategy === "ai" ? "ИИ держит позицию" : "Позиция за стоп-линией"}: ${p.sym} ${p.side}`,
+            detail: `цена ${Fmt.fmtPrice(price)} против входа ${Fmt.fmtPrice(p.entry)} — временный минус поводом закрывать не является · провал закроется только на ${Fmt.fmtPrice(fl)} (тело +${state.failPct}%) · цель остаётся ${Fmt.fmtPrice(p.target)} — ждём возврата к прибыли`,
+            sym: p.sym,
+          });
+        }
+      } else if (p.stopWarned && !Engine.behindStopLine(p, price)) {
+        p.stopWarned = false; // вернулись за стоп-линию — следующий нырок получит своё предупреждение
+      }
     }
     if (exits.length) {
       const labIds = new Set(exits.filter((e) => e.pos.owner === "lab").map((e) => e.pos.id));
@@ -1801,7 +1865,7 @@ const Store = (() => {
       state.userClosed = [...userClosedAdd, ...state.userClosed].slice(0, 300);
       state.balance += userClosedAdd.reduce((sum, c) => sum + c.size + c.pnl, 0);
       for (const c of userClosedAdd) learnFromClosed(c); // ИИ учится на авто-выходах (стоп/цель/флип/безубыток)
-      for (const c of userClosedAdd) if (c.strategy === "ai" && c.exitReason === "Стоп") noteAiStopBan(c.sym); // R28: тихий час монете
+      for (const c of userClosedAdd) if (c.strategy === "ai" && (c.exitReason === "Стоп" || c.exitReason === "Провал")) noteAiStopBan(c.sym); // R28: тихий час монете (провал — тот же доказанный провал расчёта)
       for (const c of labClosedAdd) learnFromClosed(c, true); // лаборатория тоже кормит общий мозг
       if (labClosedAdd.length) {
         state.labAccounts = state.labAccounts.map((a) => {
@@ -1919,15 +1983,11 @@ const Store = (() => {
   const CATCH_MAX_BARS = 1000;
   const CATCH_AI_EVERY = 4;          // ИИ решает на каждой 4-й свече (раз в час) — экономим CPU
 
-  // консервативное внутрисвечное исполнение: если за бар цена задевала и стоп, и цель —
-  // первым считаем стоп (худший случай, как в реальной торговле)
+  // консервативное внутрисвечное исполнение — единая логика с живым движком вынесена
+  // в Engine.catchExitOnBar (провальная линия тело+N%, гистерезис, стоп в плюсе):
+  // Страж и браузерный догон закрывают сделки по тем же правилам, что и живой тик.
   function catchExitOnBar(pos, bar) {
-    const dir = pos.side === "лонг" ? 1 : -1;
-    const hitStop = dir === 1 ? bar.l <= pos.stop : bar.h >= pos.stop;
-    const hitTarget = dir === 1 ? bar.h >= pos.target : bar.l <= pos.target;
-    if (hitStop) return { reason: "Стоп", price: pos.stop };
-    if (hitTarget) return { reason: "Цель", price: pos.target };
-    return null;
+    return Engine.catchExitOnBar(pos, bar, state.failPct);
   }
 
   function catchClosePosition(pos, price, reason, ts) {
@@ -1941,7 +2001,7 @@ const Store = (() => {
     state.userClosed = [closed, ...state.userClosed].slice(0, 400);
     state.balance += closed.size + closed.pnl;
     learnFromClosed(closed);
-    if (closed.strategy === "ai" && reason === "Стоп") noteAiStopBan(pos.sym); // R28: тихий час монете (догоняющий движок)
+    if (closed.strategy === "ai" && (reason === "Стоп" || reason === "Провал")) noteAiStopBan(pos.sym); // R28: тихий час монете (догоняющий движок)
     pushEvent({
       tone: closed.pnl >= 0 ? "bull" : "bear",
       title: `Пока вас не было: ${pos.sym} закрыта (${reason.toLowerCase()}) · ${closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))} ХРЮ`,
@@ -2028,8 +2088,8 @@ const Store = (() => {
       for (const pos of [...state.userPositions]) {
         if (pos.sym !== sym) continue;
         const hit = catchExitOnBar(pos, bar);
-        const sig = !hit && barsUpTo.length >= 22 ? Engine.evalExit(pos, barsUpTo, bar.c) : null;
-        const ex = hit || (sig && sig.reason !== "Цель" && sig.reason !== "Стоп" ? sig : null);
+        const sig = !hit && barsUpTo.length >= 22 ? Engine.evalExit(pos, barsUpTo, bar.c, state.failPct) : null;
+        const ex = hit || (sig && sig.reason !== "Цель" && sig.reason !== "Стоп" && sig.reason !== "Провал" ? sig : null);
         if (ex) {
           const closed = catchClosePosition(pos, ex.price, ex.reason, ts);
           st.closed++; st.sum += closed.pnl;
@@ -2039,8 +2099,8 @@ const Store = (() => {
       for (const pos of [...state.labPositions]) {
         if (pos.sym !== sym) continue;
         const hit = catchExitOnBar(pos, bar);
-        const sig = !hit && barsUpTo.length >= 22 && pos.side === "лонг" ? Engine.evalExit(pos, barsUpTo, bar.c) : null;
-        const ex = hit || (sig && sig.reason !== "Цель" && sig.reason !== "Стоп" ? sig : null);
+        const sig = !hit && barsUpTo.length >= 22 && pos.side === "лонг" ? Engine.evalExit(pos, barsUpTo, bar.c, state.failPct) : null;
+        const ex = hit || (sig && sig.reason !== "Цель" && sig.reason !== "Стоп" && sig.reason !== "Провал" ? sig : null);
         if (ex) {
           const closed = Engine.closeTrade(pos, ex.price, ex.reason);
           state.labPositions = state.labPositions.filter((q) => q.id !== pos.id);
@@ -2234,7 +2294,7 @@ const Store = (() => {
     placeDemo, closeDemo, setBalance, resetDemo, toggleAuto,
     loadWhales, setActiveSym, totalEquity, switchUser, canTrade,
     setMode, toggleAiAuto, recordLiveOrder, aiSessionInfo,
-    setAiThreshold, closeAllAiPositions, brainSyncInfo, setAiMaxPos, aiMaxPos,
+    setAiThreshold, setFailPct, closeAllAiPositions, brainSyncInfo, setAiMaxPos, aiMaxPos,
     // лимиты сделок: макс. одной + суммарный + авторасчёт одновременных позиций
     setMaxDeal, setMaxTotal, setAiPosMode, aiDealCap, aiTotalCap, aiTotalRemain,
     openPositionsSum, autoMaxPos, effMaxPos, aiSizeCalc, aiKellyFrac,

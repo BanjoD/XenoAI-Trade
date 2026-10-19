@@ -146,6 +146,43 @@ const Notify = (() => {
     return { ok: true };
   }
 
+  // ---------- push на смартфон через ntfy (канал, живущий при ЗАКРЫТОМ приложении) ----------
+  // Браузерные уведомления создаются страницей — когда Android/iOS выгрузил приложение из
+  // памяти, присылать некому (у статичного сайта нет своего push-сервера). Канал ntfy решает
+  // это без серверов: Страж (GitHub Actions) публикует события сделок в приватную тему
+  // xenoai-<код синхронизации>, телефон получает их как обычные push (приложение ntfy).
+  // Тема выводится из кода синхронизации — отдельный секрет заводить не нужно.
+  function ntfyTopic() {
+    try {
+      const code = window.Store && Store.state && Store.state.sync && Store.state.sync.code;
+      const clean = String(code || "").toUpperCase().replace(/[^A-Z0-9_-]/g, "");
+      return clean ? "xenoai-" + clean : null;
+    } catch (e) { return null; }
+  }
+  function ntfyPublish(title, body, tag) {
+    const topic = ntfyTopic();
+    if (!topic || typeof window.fetch !== "function") return Promise.resolve({ ok: false, why: "нет темы — код синхронизации ещё не создан" });
+    // JSON-публикация на корень ntfy; не-ASCII экранируется в \uXXXX — тело чисто ASCII
+    // (валидный JSON в любой точке маршрута), сервер декодирует обратно в кириллицу:
+    // UTF-8 в HTTP-заголовках запрещён, а «сырой» UTF-8 в JSON-теле часть маршрутов режет
+    const jsonSafe = (s) => String(s).replace(/[^\x20-\x7E]/g, (ch) => "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"));
+    const payload = jsonSafe(JSON.stringify({ topic, title: String(title || "XenoAI Trade"), message: String(body || ""), tags: [tag || "chart_with_yen_up"], priority: "default" }));
+    return fetch("https://ntfy.sh/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload,
+    })
+      .then((r) => ({ ok: r.ok, status: r.status, why: r.ok ? null : "ntfy ответил " + r.status }))
+      .catch((e) => ({ ok: false, why: (e && e.message) || "сеть недоступна" }));
+  }
+  function ntfyTest() {
+    return ntfyPublish(
+      "Проверка канала XenoAI",
+      "Если это пришло на смартфон — канал работает: Страж будет присылать сюда события сделок (входы, цели, провалы), даже когда приложение закрыто.",
+      "white_check_mark"
+    );
+  }
+
   // ---------- полноэкранный режим ----------
   function fsElement() { return document.fullscreenElement || document.webkitFullscreenElement || null; }
   function fsSupported() {
@@ -176,6 +213,7 @@ const Notify = (() => {
     init, EVENTS, getSettings() { return settings; },
     supported, permission, isIOS, isStandalone, iosNeedsInstall,
     enable, disable, setEvent, set, setMinPnl, test,
+    ntfyTopic, ntfyPublish, ntfyTest,
     fsElement, fsSupported, toggleFullscreen,
   };
 })();

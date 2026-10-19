@@ -612,6 +612,22 @@ const App = (() => {
         renderView();
         break;
       }
+      // R29 провальный порог (тело + N%): пресеты и свой ввод — единственный выход в минусе
+      case "ai:fail": {
+        const fo = Store.setFailPct(Number(arg));
+        if (!fo.ok) { h.toast("error", fo.error); break; }
+        h.toast("success", `Провальный порог: тело +${Math.round(Number(arg))}%`, Number(arg) === "0" ? "классический режим: закрытие сразу за стоп-линией" : "сделка в минусе ждёт цель; закроется только при ходе глубже тела ещё на " + Math.round(Number(arg)) + "%");
+        renderView();
+        break;
+      }
+      case "ai:fail-apply": {
+        const fi = document.getElementById("ai-fail-input");
+        const fr = Store.setFailPct(fi ? fi.value : NaN);
+        if (!fr.ok) { h.toast("error", fr.error, "Введите число от 0 до 200"); break; }
+        h.toast("success", `Провальный порог: тело +${Math.round(Store.state.failPct)}%`, "правило действует и в Страже — синхронизировано в облако");
+        renderView();
+        break;
+      }
       // максимум одновременных ИИ-позиций: АВТО из лимитов или ручной 1..8
       case "ai:maxpos": {
         const mpOut = Store.setAiPosMode(arg === "auto" ? "auto" : Number(arg));
@@ -810,6 +826,23 @@ const App = (() => {
       case "notify:test": {
         const tRes = Notify.test();
         if (!tRes.ok) h.toast("error", "Пробное уведомление не отправлено", tRes.why);
+        break;
+      }
+      case "notify:ntfy-copy": {
+        const topic = Notify.ntfyTopic();
+        if (!topic) { h.toast("error", "Темы ещё нет", "Включите синхронизацию устройств в Кабинете"); break; }
+        const doToast = () => h.toast("success", "Тема скопирована", topic + " — вставьте её в подписку приложения ntfy");
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(topic).then(doToast, () => h.toast("info", "Тема: " + topic, "Скопируйте вручную"));
+        } else h.toast("info", "Тема: " + topic, "Скопируйте вручную");
+        break;
+      }
+      case "notify:ntfy-test": {
+        h.toast("info", "Отправляю проверочный пуш…", "Он придёт на все устройства, подписанные на тему ntfy");
+        Notify.ntfyTest().then((r) => {
+          if (r.ok) h.toast("success", "Пуш отправлен в канал", "Если приложение ntfy подписано на тему — уведомление уже на телефоне");
+          else h.toast("error", "Пуш не прошёл", r.why || "проверьте сеть и имя темы");
+        });
         break;
       }
       case "fs:toggle": {

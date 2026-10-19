@@ -82,24 +82,55 @@ const Engine = (() => {
     };
   }
 
-  // выход по живой цене: цель/стоп/сигнал (двойное закрытие за серединой BB)
-  // ПОЛИТИКА ВЫХОДОВ ИИ (требование пользователя): ИИ закрывает сделку либо когда та
-  // ОЧЕВИДНО провальная (супер-убыток за стопом), либо когда фиксирует профит (цель/
-  // трейлинг/тренд-выход в плюсе). Малый минус и шум — НЕ повод закрывать: позиция
-  // дожидается цели или стопа.
-  function evalExit(pos, bars, price) {
+  // ================= ПОЛИТИКА ВЫХОДОВ: «ОЧЕВИДНО ПРОВАЛЬНАЯ СДЕЛКА» (R29) =================
+  // Требование пользователя: ИИ больше НЕ флипает сделки на копейках из-за временного
+  // минусового тренда. У каждой сделки есть «ТЕЛО» — плановый риск (расстояние вход→стоп).
+  // Авто-закрытие в минусе происходит ТОЛЬКО когда убыток превысил тело + ещё N% от тела
+  // (N — настройка «провальный порог», по умолчанию 50%): провальный уровень для лонга =
+  // вход − тело×(1+N/100), для шорта зеркально. Во ВСЕХ остальных случаях позиция ждёт
+  // профитной цели (или трейлинга в плюсе) — малый минус и фитиль за стоп-линией поводом
+  // закрывать не являются: временный откат часто возвращается, а серия копеечных стопов
+  // (кейс R29: 12 сделок «Стоп» за вечер, суммарно −55 ХРЮ при телах ~1%) разоряет
+  // статистику быстрее настоящих провалов.
+  //
+  // Логика целиком:
+  //   1) ЦЕЛЬ (2R) — фиксация профита (как раньше).
+  //   2) СТОП В ПЛЮСЕ — трейлинг уже подтянул стоп к безубытку/+0.5R/+1R: пересечение
+  //      такого стопа закрывает сделку В ПЛЮСЕ (это защита заработанного, а не убыток).
+  //   3) ПРОВАЛ (тело + N%) — единственная точка авто-закрытия в минусе.
+  //   4) ТРЕНД-ВЫХОД — только в плюсе, покрывающем комиссию (как раньше).
+  // Стоп-линия исходного стопа становится ПРЕДУПРЕЖДЕНИЕМ: за ней позиция продолжает
+  // жить (см. behindStopLine → событие «держит позицию» в ленте), закрывает её только
+  // провальный уровень. failPct=0 возвращает классическое поведение «закрытие за стопом».
+  const FAIL_SLACK = 0.0006; // гистерезис 0.06% поверх провального уровня: фитиль ровно на линии не закрывает
+
+  function failLineOf(pos, failPct) {
+    const dir = pos.side === "лонг" ? 1 : -1;
+    // тело = плановый риск на момент входа; для позиций без r0 (лаборатория/ручные)
+    // восстанавливаем из текущего стопа — трейлинг их стоп не двигает, это честное тело
+    const body = (pos.r0 && pos.r0 > 0) ? pos.r0 : Math.abs(pos.entry - pos.stop);
+    const n = Number.isFinite(Number(failPct)) ? Math.max(0, Math.min(200, Number(failPct))) : 50;
+    return pos.entry - dir * body * (1 + n / 100);
+  }
+
+  function evalExit(pos, bars, price, failPct) {
     const dir = pos.side === "лонг" ? 1 : -1;
     if (dir * (price - pos.entry) >= dir * (pos.target - pos.entry)) return { reason: "Цель", price: pos.target };
-    // стоп с ГИСТЕРЕЗИСОМ (для ВСЕХ позиций — ИИ, лаборатория, сигнал, ручная):
-    // срабатывает только на 0.06% ГЛУБЖЕ стопа — случайный фитиль/шум не выносит
-    // сделку раньше времени; у лаборатории раньше гистерезиса не было вовсе — любой
-    // фитиль выносил стратегическую сделку мгновенно (эпидемия стопов R27).
-    // Сам минус остаётся осмысленным (у ИИ стоп ≥ 0.5% от входа — уровень «супер-убытка»)
-    const slack = pos.entry * 0.0006;
-    if (dir * (price - pos.entry) <= dir * (pos.stop - pos.entry) - slack) return { reason: "Стоп", price: pos.stop };
-    // тренд-выход — СИММЕТРИЧНО для лонга и шорта (раньше был только лонг), но ТОЛЬКО
-    // когда сделка в плюсе, покрывающем комиссию с запасом: растущий тренд сломался —
-    // фиксируем профит; в малом минусе ИИ сделку не закрывает (ждёт цели или стопа)
+    const slack = pos.entry * FAIL_SLACK;
+    // 2) стоп в зоне профита (трейлинг подтянул к безубытку и выше): пересечение =
+    //    фиксация заработанного с комиссионной планкой — всегда чистый плюс
+    const stopInProfit = dir * (pos.stop - pos.entry) >= 0;
+    if (stopInProfit && dir * (price - pos.entry) <= dir * (pos.stop - pos.entry) - slack) {
+      return { reason: "Стоп", price: pos.stop };
+    }
+    // 3) ОЧЕВИДНЫЙ ПРОВАЛ: ход против сделки глубже тела + N% тела (единственный выход в минусе)
+    const failLine = failLineOf(pos, failPct);
+    if (dir * (price - pos.entry) <= dir * (failLine - pos.entry) - slack) {
+      return { reason: "Провал", price: failLine };
+    }
+    // 4) тренд-выход — СИММЕТРИЧНО для лонга и шорта, но ТОЛЬКО когда сделка в плюсе,
+    //    покрывающем комиссию с запасом: растущий тренд сломался — фиксируем профит;
+    //    в малом минусе ИИ сделку не закрывает (ждёт цели)
     if (bars && bars.length >= 22 && dir * (price - pos.entry) > pos.entry * FEE_RATE * 1.2) {
       const closes = bars.map((b) => b.c);
       const bb = Ind.bollinger(closes, 20, 2);
@@ -109,6 +140,33 @@ const Engine = (() => {
         return { reason: "Сигнал выхода", price };
       }
     }
+    return null;
+  }
+
+  // предупреждение: цена ушла за стоп-линию, но до провального уровня ещё далеко —
+  // позиция ПРОДОЛЖАЕТ ЖИТЬ и ждёт цель (возвращается в ленту как событие-держание).
+  // Работает только для стопа в минусе: у стопа в плюсе выход уже разрешён (см. evalExit).
+  function behindStopLine(pos, price) {
+    const dir = pos.side === "лонг" ? 1 : -1;
+    if (dir * (pos.stop - pos.entry) >= 0) return false; // стоп в плюсе — там своя логика выхода
+    return dir * (price - pos.entry) <= dir * (pos.stop - pos.entry);
+  }
+
+  // консервативное внутрисвечное исполнение (догоняющий движок браузера и Стража):
+  // если за бар цена задевала и выходной уровень, и цель — первым считаем ВЫХОДНОЙ
+  // УРОВЕНЬ (худший случай, как в реальной торговле). Уровень в минусе — НЕ старый
+  // стоп, а ПРОВАЛЬНАЯ ЛИНИЯ (тело + N% от тела): временный минус за стоп-линией
+  // сделку в догоне не закрывает, точно как в живом движке. Стоп, подтянутый
+  // трейлингом в зону плюса, остаётся обычным стопом (защита заработанного).
+  function catchExitOnBar(pos, bar, failPct) {
+    const dir = pos.side === "лонг" ? 1 : -1;
+    const stopInProfit = dir * (pos.stop - pos.entry) >= 0;
+    const stopLevel = stopInProfit ? pos.stop : failLineOf(pos, failPct);
+    const slack = pos.entry * FAIL_SLACK;
+    const hitStop = dir === 1 ? bar.l <= stopLevel - slack : bar.h >= stopLevel + slack;
+    const hitTarget = dir === 1 ? bar.h >= pos.target : bar.l <= pos.target;
+    if (hitStop) return { reason: stopInProfit ? "Стоп" : "Провал", price: stopLevel };
+    if (hitTarget) return { reason: "Цель", price: pos.target };
     return null;
   }
 
@@ -552,7 +610,7 @@ const Engine = (() => {
     }));
   }
 
-  return { STRATEGIES, analyzeBars, evalStrategy, evalExit, positionPnl, closeTrade, mkLabAccounts, aiAnalyze, aiFactorSnapshot, aiTrailStop, newsSentiment, AI_BASE_WEIGHTS, FEE_RATE, entryQuality, entryQualityFromBars, htfVeto };
+  return { STRATEGIES, analyzeBars, evalStrategy, evalExit, failLineOf, behindStopLine, catchExitOnBar, positionPnl, closeTrade, mkLabAccounts, aiAnalyze, aiFactorSnapshot, aiTrailStop, newsSentiment, AI_BASE_WEIGHTS, FEE_RATE, FAIL_SLACK, entryQuality, entryQualityFromBars, htfVeto };
 })();
 
 window.Engine = Engine;
