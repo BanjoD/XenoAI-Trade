@@ -992,10 +992,17 @@ const ViewsTrade = (() => {
     const totalPnl = s.userClosed.reduce((a, c) => a + c.pnl, 0);
     const sync = typeof Store.syncInfo === "function" ? Store.syncInfo() : null;
     const catchI = typeof Store.catchInfo === "function" ? Store.catchInfo() : null;
+    // R31: кто сейчас исполнитель автоторговли — видно одинаково на всех устройствах
+    const execTxt = !sync ? "" : (sync.isHost
+      ? "<b>это устройство</b>"
+      : sync.host
+        ? `<b>${h.esc(sync.host.tag || "другое устройство")}</b> (аренда до ${Fmt.fmtClock(sync.host.until)})`
+        : "свободно — аренду возьмёт первое включённое устройство или Страж");
     const syncStatus = !sync ? "" : `<div class="sync-state">
         <span class="np-ok">включена · всегда</span> · код аккаунта <b class="num" id="sync-code-txt">${h.esc(sync.code || "—")}</b>
         <button class="link-btn" data-action="sync:copy">${h.icon("copy", 12)} скопировать</button>
-        <div class="num" style="margin-top:4px;font-size:11.5px;color:#8d8a94">единый аккаунт — единые данные: код выводится из логина, на новом устройстве вводить его не нужно · пуш: ${sync.lastPush ? Fmt.fmtClock(sync.lastPush) : "—"} · пул: ${sync.lastPull ? Fmt.fmtClock(sync.lastPull) : "—"}${sync.lastError ? ` · <span class="text-red">${h.esc(sync.lastError)}</span>` : ""}</div>
+        <div class="num" style="margin-top:4px;font-size:11.5px;color:#8d8a94">серверный аккаунт: облако — единственный источник правды, перед КАЖДОЙ записью устройство сначала сливает облако со своим состоянием (ничьих позиций больше не пропадает) · пуш: ${sync.lastPush ? Fmt.fmtClock(sync.lastPush) : "—"} · пул: ${sync.lastPull ? Fmt.fmtClock(sync.lastPull) : "—"}${sync.lastError ? ` · <span class="text-red">${h.esc(sync.lastError)}</span>` : ""}</div>
+        <div class="num" style="margin-top:4px;font-size:11.5px;color:#8d8a94">исполнитель автоторговли (входы ИИ, флипы, входы лаборатории): ${execTxt} · защитные выходы (стопы/цели/провал) работают на всех устройствах сразу и схлопываются при слиянии</div>
       </div>`;
     const syncBlock = `
       <div class="notify-sec">Синхронизация устройств · всегда включена</div>

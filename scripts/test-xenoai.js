@@ -309,7 +309,85 @@ section("Web Push: RFC 8291 roundtrip + VAPID ES256 (оффлайн)");
   ok(Boolean(threw), "битый p256dh подписки не роняет процесс, а отклоняется");
 }
 
-// ================= 9. Исходный контроль R29 + R30 =================
+// ================= 9. R31: СЕРВЕРНЫЙ АККАУНТ =================
+section("R31: слияние ПЕРЕД записью — «свежее» устройство не затирает позиции второго");
+{
+  // кейс R31 со скринов: ПК и телефон с разными наборами позиций. Раньше устройство
+  // с большим updatedAt пушало свой архив КАК ЕСТЬ — позиции другой стороны исчезали.
+  // Теперь перед каждой записью обязательное слияние: выжить должны обе стороны.
+  const pc = {
+    v: 3, rev: 50, updatedAt: 2000, balance: 9385, startBalance: 10000,
+    userPositions: [
+      { id: "p1", owner: "user", strategy: "ai", sym: "ZEC", side: "лонг", size: 300, lev: 1, entry: 100, stop: 95, target: 110, openedAt: 500, mt: 1500 },
+      { id: "p2", owner: "user", strategy: "user", sym: "UNI", side: "лонг", size: 460, lev: 1, entry: 7.4, stop: 7, target: 8, openedAt: 500, mt: 1500 },
+    ],
+    userClosed: [], labPositions: [], labClosed: [], events: [], equityHist: [], clearedU: [], clearedL: [],
+    pushSubs: [], host: null, maxDeal: 1000, maxTotal: 5000, aiThreshold: 50, aiPosMode: "auto", failPct: 50,
+    autoTrade: true, aiAuto: true, aiAutoLive: false, mode: "demo",
+  };
+  const phone = JSON.parse(JSON.stringify(pc));
+  phone.updatedAt = 1000; phone.balance = 9795;
+  phone.userPositions = [{ id: "p2", owner: "user", strategy: "user", sym: "UNI", side: "лонг", size: 460, lev: 1, entry: 7.4, stop: 7.1, target: 8, openedAt: 500, mt: 1800 }]; // телефон двигал стоп p2
+  const mR31 = Store._mergeArchives(pc, phone); // main = ПК (updatedAt 2000)
+  ok(mR31.userPositions.length === 2, "позиции ОБЕИХ сторон живы после слияния (ZEC и UNI)", JSON.stringify(mR31.userPositions.map((p) => p.id)));
+  ok(mR31.userPositions.find((p) => p.id === "p2").stop === 7.1, "у спорной позиции берётся свежая правка (стоп 7.1 по mt 1800)");
+  ok(mR31.balance === 9385, "баланс согласован с позициями main-стороны", String(mR31.balance));
+}
+
+section("R31: аренда исполнителя автоторговли (host) — merge, claim, release");
+{
+  const base = { v: 3, rev: 1, updatedAt: 100, balance: 1000, startBalance: 1000, userPositions: [], userClosed: [], labPositions: [], labClosed: [], events: [], equityHist: [], clearedU: [], clearedL: [], pushSubs: [] };
+  const h1 = Object.assign({}, base, { host: { id: "dA", tag: "браузер", until: 5000 } });
+  const h2 = Object.assign({}, base, { host: { id: "dB", tag: "Страж", until: 9000 } });
+  ok(Store._mergeArchives(h1, h2).host.id === "dB", "слияние аренды: действует более поздний срок (dB)");
+  ok(Store._mergeArchives(h1, Object.assign({}, base, { host: null })).host.id === "dA", "слияние аренды: null не затирает живую аренду");
+  ok(Store._fpOf(h1) !== Store._fpOf(Object.assign({}, base, { host: { id: "dA", tag: "браузер", until: 6000 } })), "продление аренды меняет отпечаток (уезжает в облако)");
+
+  Store.state.host = { id: "other-device", tag: "чужой", until: Date.now() + 60000 };
+  ok(Store.isAutoHost() === false, "чужая живая аренда — это устройство НЕ исполнитель");
+  ok(Store.claimHost("тест") === false, "заявка при чужой живой аренде отклонена");
+  ok(Store.hostInfo().host.id === "other-device", "чужая аренда видна в hostInfo (Кабинет покажет её)");
+  Store.state.host = { id: "other-device", tag: "чужой", until: Date.now() - 10 };
+  ok(Store.hostInfo().host === null, "истёкшая аренда = свободно");
+  ok(Store.claimHost("тест-девайс") === true, "свободная аренда берётся");
+  ok(Store.isAutoHost() === true && Store.state.host.tag === "тест-девайс", "после заявки это устройство — исполнитель с меткой");
+  ok(Store.releaseHost(true) === true && Store.hostInfo().host === null, "releaseHost освобождает аренду");
+
+  Store.state.host = { id: "dX", tag: "т", until: 123456 };
+  const arch = Store.archiveAccount();
+  ok(arch.host && arch.host.id === "dX" && arch.host.until === 123456, "аренда попадает в архив (и в облако)");
+  Store.state.host = null;
+  Store._applyArchive(arch);
+  ok(Store.state.host && Store.state.host.id === "dX", "аренда восстанавливается из архива облака");
+  Store.releaseHost(true);
+}
+
+section("R31: часы изменения — фоновый персист не двигает updatedAt");
+{
+  const b5 = boot();
+  const S5 = b5.Store.state;
+  b5.Store.start();
+  S5.balance = 12345;
+  b5.Store._persistNow();
+  const t1 = S5.updatedAt;
+  ok(t1 > 0, "первое сохранение ставит часы изменения");
+  b5.Store._persistNow(); // повторная запись без изменений содержимого
+  ok(S5.updatedAt === t1, "фоновая запись (эквити/цены) НЕ двигает updatedAt — прежняя причина вечного «я свежее»");
+  S5.balance = 12346;
+  while (Date.now() <= t1) {} // VM быстрый: гарантируем, что настенные часы ушли вперёд с t1
+  b5.Store._persistNow();
+  ok(S5.updatedAt > t1, "реальное изменение (баланс) двигает часы");
+}
+
+section("R31: дедупликация двойных исполнений закрытия в ленте событий");
+{
+  const base = { v: 3, rev: 1, updatedAt: 100, balance: 1000, startBalance: 1000, userPositions: [], userClosed: [], labPositions: [], labClosed: [], events: [], equityHist: [], clearedU: [], clearedL: [], pushSubs: [] };
+  const eA = Object.assign({}, base, { events: [{ id: "xp1", ts: 10, tone: "bull", title: "закрыта" }] });
+  const eB = Object.assign({}, base, { events: [{ id: "xp1", ts: 12, tone: "bull", title: "закрыта" }] });
+  ok(Store._mergeArchives(eA, eB).events.length === 1, "одно закрытие, исполненное двумя устройствами, даёт ОДНО событие (детерминированный id)");
+}
+
+// ================= 10. Исходный контроль R29 + R30 + R31 =================
 section("Исходники: контроль ключевых констант");
 {
   const engineSrc = fs.readFileSync(path.join(REPO, "js", "engine.js"), "utf8");
@@ -331,6 +409,20 @@ section("Исходники: контроль ключевых констант"
   ok(/savePriceSnapshot\(\); \/\/ R30: цены последнего сеанса/.test(storeSrc), "снапшот цен пишется при выгрузке страницы");
   ok(/restorePriceSnapshot\(\); \/\/ R30: цены прошлого сеанса/.test(storeSrc), "снапшот цен восстанавливается при загрузке");
 
+  // R31: серверный аккаунт — слияние перед каждой записью, один исполнитель, честные часы
+  ok(/const merged = mergeArchives\(local, remote\);/.test(storeSrc) && !/remote\.updatedAt \|\| 0\)\) \{ syncPush/.test(storeSrc), "путь «записать облако без слияния» удалён (причина расхождения ПК/телефон)");
+  ok(/if \(isAutoHost\(\)\) \{ try \{ aiAutoStep/.test(storeSrc), "входы ИИ — только у исполнителя (серверная аренда)");
+  ok(/if \(!isAutoHost\(\)\) continue; \/\/ R31: вход лаборатории/.test(storeSrc), "входы лаборатории — только у исполнителя");
+  ok(/if \(!claimHost\("устройство · догон рынка"\)\) return/.test(storeSrc), "догон рынка — только у исполнителя");
+  ok(/id: "x" \+ pidOfClosed\(e\.closed\)/.test(storeSrc), "детерминированные id событий закрытия (дедуп двойных исполнений)");
+  ok(!/Синхронизация: архив аккаунта обновлён/.test(storeSrc), "облачное слияние молча (без событий-топлива для цикла записей)");
+  ok(/syncPull\(\); \}, 20000\)/.test(storeSrc), "опрос сервера раз в 20 секунд");
+  ok(/Date\.now\(\) - lastCycleOkAt > 25000/.test(storeSrc), "beacon пишет только свежее 25с состояние (без перетирания)");
+
+  const guardSrcR31 = fs.readFileSync(path.join(REPO, "tools", "guardian.js"), "utf8");
+  ok(/Store\.claimHost\("Страж \(GitHub Actions\)"\)/.test(guardSrcR31), "Страж берёт аренду и не мешает живому устройству");
+  ok(/Store\.releaseHost\(true\)/.test(guardSrcR31), "Страж освобождает аренду перед выходом");
+
   const notifySrc = fs.readFileSync(path.join(REPO, "js", "notify.js"), "utf8");
   ok(/pushManager\.subscribe/.test(notifySrc) && /VAPID_PUBLIC = "BEwaH/.test(notifySrc), "нативная подписка Web Push с VAPID-ключом платформы");
   ok(notifySrc.indexOf("ntfy") === -1, "ntfy полностью убран из notify.js");
@@ -349,9 +441,9 @@ section("Исходники: контроль ключевых констант"
   ok(/торговля стоит · цены заморожены/.test(viewsSrc), "честная плашка деградации в сделках");
 
   const swSrc = fs.readFileSync(path.join(REPO, "sw.js"), "utf8");
-  ok(/VERSION = "xenoai-v13"/.test(swSrc), "SW поднят до v13");
+  ok(/VERSION = "xenoai-v14"/.test(swSrc), "SW поднят до v14");
   const idx = fs.readFileSync(path.join(REPO, "index.html"), "utf8");
-  ok(idx.indexOf("v=20261034") !== -1, "кэш-версии ?v=20261034");
+  ok(idx.indexOf("v=20261035") !== -1, "кэш-версии ?v=20261035");
   const yml = fs.readFileSync(path.join(REPO, ".github", "workflows", "guardian.yml"), "utf8");
   ok(yml.indexOf("npm install") === -1, "Стражу не нужны npm-зависимости (чистый Node crypto)");
 }

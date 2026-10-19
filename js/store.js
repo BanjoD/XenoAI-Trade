@@ -67,6 +67,7 @@ const Store = (() => {
     clearedL: [],       // «могилки» очищенной истории лаборатории
     pushSubs: [],       // R30: push-подписки устройств (Web Push) — Страж шлёт по ним пуши о сделках
     sync: { code: null, enabled: false, lastPush: 0, lastPull: 0, lastError: null, lastSeenRev: 0, sawRemote: false }, // синхронизация устройств
+    host: null,         // R31 «серверный аккаунт»: кто сейчас исполнитель автоторговли { id, tag, until } (аренда уезжает в облако)
   };
 
   // ------- память ИИ (обучение на результатах сделок) -------
@@ -353,6 +354,8 @@ const Store = (() => {
       clearedU: (s.clearedU || []).slice(-800), clearedL: (s.clearedL || []).slice(-800),
       // R30: push-подписки устройств (Web Push) — по ним Страж шлёт пуши о сделках
       pushSubs: (s.pushSubs || []).slice(0, 8),
+      // R31: аренда исполнителя автоторговли — часть серверного состояния аккаунта
+      host: s.host && s.host.id ? { id: s.host.id, tag: s.host.tag || "", until: s.host.until || 0 } : null,
       // идеи сканера сохраняются: после перезапуска вкладки «Сигналы» сразу полные,
       // а не ждут 45с, пока сканер обойдёт все монеты заново
       aiIdeas: s.aiIdeas.slice(0, 8).map((i) => ({
@@ -369,18 +372,28 @@ const Store = (() => {
     };
   }
 
+  // R31: ЧАСЫ ИЗМЕНЕНИЯ ДВИГАЮТСЯ ТОЛЬКО РЕАЛЬНЫМИ ИЗМЕНЕНИЯМИ. Раньше updatedAt
+  // ставило время КАЖДОЕ сохранение — включая фоновый персист эквити раз в 30 секунд.
+  // Открытая вкладка всегда считала себя «самой свежей» и перетирала облако без
+  // слияния (главная причина расхождения ПК/телефон). Теперь: если отпечаток
+  // содержимого (fpOf) не изменился — это фоновая запись, часы не трогаем.
+  let lastPersistFp = null;
+  function persistNow() {
+    if (!Auth.sessionLogin()) return;
+    persistTimer = null;
+    const data = archiveAccount();
+    const fp = fpOf(data);
+    state.rev = (state.rev || 0) + 1; // каждая запись — новая ревизия (слияние синка)
+    if (fp !== lastPersistFp) state.updatedAt = Date.now(); // только содержательные изменения двигают часы
+    lastPersistFp = fp;
+    data.rev = state.rev;
+    writeRawSafe(dataKey(), JSON.stringify(data));
+    scheduleSyncPush(); // облачная синхронизация устройств (если включена)
+  }
   function persist() {
     if (!Auth.sessionLogin()) return;
     if (persistTimer) return;
-    persistTimer = setTimeout(() => {
-      persistTimer = null;
-      state.rev = (state.rev || 0) + 1; // каждая запись — новая ревизия (слияние синка)
-      state.updatedAt = Date.now();     // настенные часы изменения — их сравнивают устройства
-      const data = archiveAccount();
-      data.rev = state.rev;
-      writeRawSafe(dataKey(), JSON.stringify(data));
-      scheduleSyncPush(); // облачная синхронизация устройств (если включена)
-    }, 400);
+    persistTimer = setTimeout(persistNow, 400);
   }
   // применение снимка аккаунта к состоянию (общее для hydrate, облачного синка и файлового бэкапа)
   function applyArchive(d) {
@@ -433,6 +446,11 @@ const Store = (() => {
         .filter((s) => s && typeof s.endpoint === "string" && s.endpoint.indexOf("https://") === 0 && s.keys && s.keys.p256dh && s.keys.auth)
         .slice(0, 8);
     }
+    // R31: аренда исполнителя автоторговли (кто сейчас ведёт входы/флипы — видно в Кабинете)
+    if (d.host === null) state.host = null;
+    else if (d.host && typeof d.host === "object" && typeof d.host.id === "string" && d.host.id && typeof d.host.until === "number") {
+      state.host = { id: d.host.id, tag: typeof d.host.tag === "string" ? d.host.tag.slice(0, 40) : "", until: d.host.until };
+    }
     if (state.clearedU.length) {
       const tomb = new Set(state.clearedU);
       state.userClosed = (state.userClosed || []).filter((c) => !tomb.has(c.id));
@@ -483,6 +501,8 @@ const Store = (() => {
       }
     } catch (e) { diagError("чтение хранилища", e); }
     restorePriceSnapshot(); // R30: цены прошлого сеанса — до первого ответа источников
+    loadDeviceId(); // R31: идентичность устройства для аренды исполнителя
+    lastPersistFp = fpOf(archiveAccount()); // фоновый персист после загрузки не должен двигать часы
     initSyncRuntime(); // синхронизация устройств: метаданные + опрос облака
     initBrainSync(); // тянет облако и запускает периодический опрос (один раз за загрузку страницы)
   }
@@ -511,6 +531,8 @@ const Store = (() => {
     state.aiCooldownUntil = 0; state.aiCooldownSeen = 0;
     state.aiBan = {}; state.aiLastEntryTs = 0; state.aiRelaxAt = 0;
     state.clearedU = []; state.clearedL = [];
+    state.host = null; // R31: аренда исполнителя не переходит между аккаунтами
+    lastPersistFp = null;
     state.sync = { code: null, enabled: false, lastPush: 0, lastPull: 0, lastError: null, lastSeenRev: 0, sawRemote: false };
     // sync-рантайм перезапускается для нового пользователя: метаданные читаются заново,
     // авто-включение синка срабатывает для его аккаунта (initSyncRuntime — одноразовый)
@@ -684,6 +706,12 @@ const Store = (() => {
     // push-подписки всех устройств
     out.pushSubs = mergePushSubs(a.pushSubs, b.pushSubs);
 
+    // R31: аренда исполнителя — действует аренда с БОЛЕЕ ПОЗДНИМ сроком (кто последний
+    // продлил, тот и жив); просроченная ни на что не влияет (hostActive проверяет until)
+    const ha = a.host && a.host.id ? a.host : null;
+    const hb = b.host && b.host.id ? b.host : null;
+    out.host = !ha ? hb : !hb ? ha : (((hb.until || 0) >= (ha.until || 0)) ? hb : ha);
+
     // могилки очистки истории объединяются с обеих сторон: удалённое на любом
     // устройстве не воскресает из архива другого устройства или облака
     out.clearedU = Array.from(new Set([...(a.clearedU || []), ...(b.clearedU || [])])).slice(-800);
@@ -706,11 +734,17 @@ const Store = (() => {
     applyArchive(d);
     state.updatedAt = Date.now(); // содержимое аккаунта только что изменилось — фиксируем сразу, не дожидаясь debounce persist
     const after = { bal: state.balance, closed: state.userClosed.length, open: state.userPositions.length };
-    pushEvent({
-      tone: "neutral",
-      title: `Синхронизация: архив аккаунта обновлён (${sourceLabel})`,
-      detail: `баланс ${Fmt.fmtNum(Math.round(before.bal))} → ${Fmt.fmtNum(Math.round(after.bal))} ХРЮ · закрытых сделок ${before.closed} → ${after.closed} · в рынке ${before.open} → ${after.open} · история объединена без потерь`,
-    });
+    // ВАЖНО (R31): событие в ленту — ТОЛЬКО для ручного восстановления. Облачное
+    // слияние применяется молча: иначе каждое слияние добавляло бы событие, оно
+    // меняло бы отпечаток → пуш → слияние у второго устройства → его событие →
+    // бесконечная перезапись облака (цикл пожирал бы дневной лимит записей).
+    if (sourceLabel === "файловый бэкап") {
+      pushEvent({
+        tone: "neutral",
+        title: `Архив аккаунта восстановлен (${sourceLabel})`,
+        detail: `баланс ${Fmt.fmtNum(Math.round(before.bal))} → ${Fmt.fmtNum(Math.round(after.bal))} ХРЮ · закрытых сделок ${before.closed} → ${after.closed} · в рынке ${before.open} → ${after.open} · история объединена без потерь`,
+      });
+    }
     persist();
     emit();
   }
@@ -749,42 +783,156 @@ const Store = (() => {
       && d.balance === d.startBalance;
   }
 
-  function syncPush(force) {
-    if (!state.started || !state.sync.enabled || !state.sync.code) return Promise.resolve(false);
-    if (syncCtl.busy) { syncCtl.pending = true; return Promise.resolve(false); }
-    // троттлинг записи (лимит облака — 500 записей/сутки с IP): не чаще раза в 50 секунд;
-    // force=true — для пулов-«посева» и повторов очереди, он всё равно проходит через бюджет
-    const since = Date.now() - (state.sync.lastPush || 0);
-    if (!force && since < 50000) {
-      if (!syncCtl.pushTimer) syncCtl.pushTimer = setTimeout(() => { syncCtl.pushTimer = null; syncPush(true); }, Math.max(2000, 50000 - since));
-      return Promise.resolve(false);
+  // ============ R31: СЕРВЕРНЫЙ АККАУНТ ============
+  // До R31 синхронизация была «перекрёстной записью целых архивов»: устройство,
+  // считавшее себя самым свежим, затирало облако ЦЕЛИКОМ без слияния, а фоновый
+  // персист эквити раз в 30 секунд постоянно двигал его часы (updatedAt) — поэтому
+  // ПК и телефон бесконечно перетирали друг друга (на ПК одни позиции, на телефоне
+  // другие — кейс со скринов). Теперь аккаунт ЖИВЁТ НА СЕРВЕРЕ (облако), устройства —
+  // тонкие клиенты:
+  //   1) каждый цикл: ПРОЧИТАТЬ облако → СЛИТЬ с локальным (union позиций и истории)
+  //      → записать слитое. Пути «записать без слияния» больше НЕ СУЩЕСТВУЕТ;
+  //   2) автоторговлю ведёт ОДИН исполнитель (аренда «host» — часть облака аккаунта):
+  //      входы ИИ, флипы и входы лаборатории делает только он, дублей не появляется;
+  //   3) часы изменения двигают только реальные изменения (см. persistNow), а не
+  //      фоновые сохранения — «свежесть» снова стала честной.
+  const HOST_TTL = 10 * 60000;        // аренда исполнителя: 10 минут
+  const HOST_RENEW_LEFT = 4 * 60000;  // продлеваем, когда аренде осталось меньше 4 минут
+  let deviceId = null;
+  function loadDeviceId() {
+    if (deviceId) return deviceId;
+    try { deviceId = localStorage.getItem(dataKey() + "__device"); } catch (e) { /* noop */ }
+    if (!deviceId || typeof deviceId !== "string") {
+      deviceId = "d" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      try { localStorage.setItem(dataKey() + "__device", deviceId); } catch (e2) { /* noop */ }
     }
-    const local = archiveAccount();
+    return deviceId;
+  }
+  function hostActive() {
+    return (state.host && state.host.id && (state.host.until || 0) > Date.now()) ? state.host : null;
+  }
+  function isAutoHost() {
+    const h = hostActive();
+    return !!h && h.id === (deviceId || loadDeviceId());
+  }
+  function hostFree() { return !hostActive(); }
+  // заявка на исполнение: свободно → берём; уже наше → true; чужая живая аренда → false
+  function claimHost(tag) {
+    loadDeviceId();
+    if (isAutoHost()) return true;
+    if (!hostFree()) return false;
+    state.host = { id: deviceId, tag: String(tag || "устройство").slice(0, 40), until: Date.now() + HOST_TTL };
+    persist(); emit();
+    return true;
+  }
+  function renewHostIfDue() {
+    if (!isAutoHost()) return false;
+    if ((state.host.until || 0) - Date.now() >= HOST_RENEW_LEFT) return false;
+    state.host.until = Date.now() + HOST_TTL; // отпечаток изменится — аренда уедет в облако ближайшей записью
+    persist();
+    return true;
+  }
+  function releaseHost(silent) {
+    if (!isAutoHost()) return false;
+    state.host = null;
+    if (!silent) { persist(); emit(); }
+    return true;
+  }
+  // исполнитель берётся сам, как только аренда освободилась и включена автоторговля
+  function maybeTakeHost() {
+    if (!state.started || syncCtl.busy) return;
+    if (!(state.aiAuto || state.autoTrade)) return;
+    if (isAutoHost() || !hostFree()) return;
+    setTimeout(() => {
+      if (!state.started || syncCtl.busy || isAutoHost() || !hostFree()) return;
+      let tag = "устройство";
+      try { tag = navigator.userAgent && navigator.userAgent.indexOf("Mobi") !== -1 ? "смартфон" : "браузер"; } catch (e) { /* noop */ }
+      if (claimHost(tag)) {
+        pushEvent({ tone: "neutral", title: "Автоторговля на этом устройстве", detail: "получена серверная аренда исполнителя: входы ИИ, флипы и входы лаборатории ведёт эта вкладка. Состояние аккаунта при этом одно и то же на всех устройствах — различается только то, кто исполняет." });
+      }
+    }, Math.floor(Math.random() * 3000)); // джиттер: два устройства не должны схватить аренду в один миг
+  }
+
+  let lastWriteAt = 0;
+  let lastCycleOkAt = 0;
+  function putArchive(local, force) {
     // пустой счёт не затирает облако, где уже есть данные другого устройства
     if (state.sync.sawRemote && isVirginArchive(local)) return Promise.resolve(false);
     const fp = fpOf(local);
     if (force !== "seed" && fp === syncCtl.lastPushedFp) return Promise.resolve(false); // содержимое не менялось — запись не тратим
+    // троттлинг записи (лимит облака — 500 записей/сутки с IP): не чаще раза в 15 секунд
+    const since = Date.now() - (state.sync.lastPush || 0);
+    if (force !== "seed" && since < 15000) {
+      if (!syncCtl.pushTimer) syncCtl.pushTimer = setTimeout(() => { syncCtl.pushTimer = null; syncCycle(); }, Math.max(2000, 15000 - since));
+      return Promise.resolve(false);
+    }
     if (!budgetTake()) { state.sync.lastError = "дневной лимит записей облака исчерпан — данные уедут при следующем окне"; return Promise.resolve(false); }
-    syncCtl.busy = true;
     const body = "key=" + encodeURIComponent(syncKey()) + "&value=" + encodeURIComponent(JSON.stringify(trimForCloud(local)));
     return fetchT(SYNC_UPDATE_URL, 20000, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body })
-      .then((r) => { if (!r.ok) throw new Error("пуш " + r.status); return r.json().catch(() => ({})); })
+      .then((r) => { if (!r.ok) throw new Error("запись " + r.status); return r.json().catch(() => ({})); })
       .then((j) => {
         if (j && j.status === 0) throw new Error("облако отклонило запись");
         state.sync.lastPush = Date.now(); state.sync.lastError = null;
+        lastWriteAt = Date.now();
         syncCtl.lastPushedFp = fp;
         return true;
       })
-      .catch((e) => { state.sync.lastError = "пуш: " + String(e && e.message || e); return false; })
+      .catch((e) => { state.sync.lastError = "запись: " + String(e && e.message || e); return false; });
+  }
+
+  // ЕДИНЫЙ ЦИКЛ СИНХРОНИЗАЦИИ: прочитать → слить → записать слитое.
+  // Вызывается по расписанию (20 с), после изменений (debounce 8 с), по фокусу/сети
+  // и вручную («Синхронизировать сейчас»).
+  function syncCycle() {
+    if (!state.started || !state.sync.enabled || !state.sync.code) return Promise.resolve(false);
+    if (syncCtl.busy) { syncCtl.pending = true; return Promise.resolve(false); }
+    syncCtl.busy = true;
+    return fetchT(SYNC_BASE + syncKey(), 12000)
+      .then((r) => { if (!r.ok) throw new Error("чтение " + r.status); return r.text(); })
+      .then((txt) => {
+        txt = (txt || "").trim();
+        state.sync.lastPull = Date.now();
+        state.sync.lastError = null;
+        if (!txt) {
+          // облако пустое (новый аккаунт): сеем своим архивом, если есть чем
+          return putArchive(archiveAccount(), "seed");
+        }
+        const remote = JSON.parse(txt);
+        if (!remote || typeof remote !== "object" || !Array.isArray(remote.userClosed)) throw new Error("чужой или битый архив");
+        state.sync.sawRemote = true; // облако живо и с данными: пустой локальный счёт его не затрёт
+        const local = archiveAccount();
+        local.updatedAt = state.updatedAt || 0;
+        if (fpOf(remote) === fpOf(local)) {
+          state.rev = Math.max(state.rev || 0, remote.rev || 0);
+          syncCtl.lastPushedFp = fpOf(local);
+          renewHostIfDue();
+          return false;
+        }
+        // СЕРВЕРНАЯ ДИСЦИПЛИНА: прежде чем писать — ВСЕГДА сливаем облако с локальным.
+        // Путь «моя копия свежее — запишу её как есть» удалён: именно он гонял устройства
+        // по кругу и разваливал аккаунт на два разных.
+        const merged = mergeArchives(local, remote);
+        if (fpOf(merged) !== fpOf(local)) applySyncArchive(merged, "облако");
+        renewHostIfDue();
+        return putArchive(archiveAccount(), false);
+      })
+      .catch((e) => { state.sync.lastError = String(e && e.message || e); return false; })
       .then((ok) => {
-        syncCtl.busy = false; persistSyncMeta();
-        if (syncCtl.pending) { syncCtl.pending = false; setTimeout(() => syncPush(true), 3000); }
-        emit(); return ok;
+        syncCtl.busy = false;
+        if (ok) lastCycleOkAt = Date.now();
+        persistSyncMeta();
+        maybeTakeHost();
+        emit();
+        if (syncCtl.pending) { syncCtl.pending = false; setTimeout(() => syncCycle(), 3000); }
+        return ok;
       });
   }
+  // совместимые имена: всё, что звало syncPull/syncPush, получает единый цикл
+  function syncPull() { return syncCycle(); }
+  function syncPush() { return syncCycle(); }
   function scheduleSyncPush() {
     if (!state.sync.enabled || !state.sync.code || syncCtl.pushTimer) return;
-    syncCtl.pushTimer = setTimeout(() => { syncCtl.pushTimer = null; syncPush(false); }, 8000);
+    syncCtl.pushTimer = setTimeout(() => { syncCtl.pushTimer = null; syncCycle(); }, 8000);
   }
   // «отпечаток» архива: состав баланса/позиций/истории/настроек без ревизий.
   // Нужен, чтобы синхронизация не зацикливалась: если содержимое после слияния
@@ -806,61 +954,9 @@ const Store = (() => {
       a.maxDeal, a.maxTotal, a.aiThreshold, a.aiPosMode,
       a.failPct, // R30: провальный порог — Страж должен получить его как можно раньше
       (a.pushSubs || []).length, // новая подписка устройства обязана уехать в облако
+      a.host ? a.host.id + ":" + a.host.until : "-", // R31: аренда исполнителя обязана уезжать (заявка/продление/освобождение)
       a.mode, a.autoTrade ? 1 : 0, a.aiAuto ? 1 : 0, a.aiAutoLive ? 1 : 0,
     ].join("|");
-  }
-
-  function syncPull() {
-    if (!state.sync.enabled || !state.sync.code) return Promise.resolve(false);
-    if (syncCtl.busy) return Promise.resolve(false);
-    syncCtl.busy = true;
-    return fetchT(SYNC_BASE + syncKey(), 12000)
-      .then((r) => { if (!r.ok) throw new Error("pull " + r.status); return r.text(); })
-      .then((txt) => {
-        txt = (txt || "").trim();
-        if (!txt) {
-          // облако пустое (новый код): сеем его своим архивом, если есть чем —
-          // иначе (девственный счёт) запись не тратим
-          const local0 = archiveAccount();
-          if (!isVirginArchive(local0)) return syncPush("seed");
-          return false;
-        }
-        const remote = JSON.parse(txt);
-        if (!remote || typeof remote !== "object" || !Array.isArray(remote.userClosed)) throw new Error("чужой или битый архив");
-        state.sync.lastPull = Date.now();
-        state.sync.lastError = null;
-        state.sync.sawRemote = true; // облако живо и с данными: пустой локальный счёт отныне не может его затереть
-        const local = archiveAccount();
-        // ВАЖНО: archiveAccount() у девственного аккаунта (updatedAt=0) подставляет свежий
-        // Date.now() — и свежий ПК считал бы себя «новее» архива телефона в облаке,
-        // отказываясь от слияния (точный кейс пользователя: телефон 7 сделок / ПК 0).
-        // Для сравнения и слияния используем НАСТОЯЩИЕ настенные часы состояния.
-        local.updatedAt = state.updatedAt || 0;
-        // содержимое совпало — ограничиваемся принятием старшей ревизии, без цикла пушей
-        if (fpOf(remote) === fpOf(local)) {
-          state.rev = Math.max(state.rev || 0, remote.rev || 0);
-          syncCtl.lastPushedFp = fpOf(local);
-          return false;
-        }
-        // локальные изменения свежее облака — делимся собой (второе устройство подтянет при своём пуле)
-        if ((local.updatedAt || 0) >= (remote.updatedAt || 0)) { syncPush(false); return false; }
-        // облако свежее: сливаем (история объединяется) и применяем один раз
-        const merged = mergeArchives(local, remote);
-        if (fpOf(merged) === fpOf(local)) {
-          // слияние не изменило локальное содержимое — принимаем ревизию без лишнего цикла пуша
-          state.rev = Math.max(state.rev || 0, remote.rev || 0);
-          return false;
-        }
-        applySyncArchive(merged, "облако");
-        syncCtl.lastPushedFp = null; // содержимое изменилось — следующий пуш обязан уйти
-        return true;
-      })
-      .catch((e) => {
-        const msg = String(e && e.message || e);
-        if (msg.indexOf("пустое") === -1) state.sync.lastError = msg; // пустое облако — норма для нового кода
-        return false;
-      })
-      .then((changed) => { syncCtl.busy = false; persistSyncMeta(); emit(); return changed; });
   }
 
   function enableSync(code) {
@@ -875,15 +971,22 @@ const Store = (() => {
     // порядок важен: СНАЧАЛА тянем облачный архив (если код уже используется другим
     // устройством — подтянем его историю, а не затрём её своим пустым состоянием),
     // потом делимся своим
-    syncPull().then(() => { if (state.sync.enabled) syncPush(true); });
+    syncPull().then(() => { if (state.sync.enabled) syncPush(); });
     if (typeof setInterval === "function" && !syncCtl.pollTimer) {
-      syncCtl.pollTimer = setInterval(() => { if (state.started && state.sync.enabled) syncPull(); }, 120000);
+      syncCtl.pollTimer = setInterval(() => { if (state.started && state.sync.enabled) syncPull(); }, 20000);
     }
     persist(); emit();
     return { ok: true, code: state.sync.code };
   }
   function syncInfo() {
-    return { code: state.sync.code, enabled: state.sync.enabled, lastPush: state.sync.lastPush, lastPull: state.sync.lastPull, lastError: state.sync.lastError, busy: syncCtl.busy };
+    const h = hostActive();
+    return {
+      code: state.sync.code, enabled: state.sync.enabled, lastPush: state.sync.lastPush, lastPull: state.sync.lastPull, lastError: state.sync.lastError, busy: syncCtl.busy,
+      // R31: кто сейчас исполнитель автоторговли (видно в Кабинете на любом устройстве)
+      host: h ? { id: h.id, tag: h.tag || "", until: h.until } : null,
+      me: deviceId || loadDeviceId(),
+      isHost: isAutoHost(),
+    };
   }
   function initSyncRuntime() {
     if (syncCtl.inited) return;
@@ -907,23 +1010,40 @@ const Store = (() => {
     }
     if (state.sync.enabled && state.sync.code) {
       if (typeof setInterval === "function" && !syncCtl.pollTimer) {
-        syncCtl.pollTimer = setInterval(() => { if (state.started && state.sync.enabled) syncPull(); }, 60000);
+        syncCtl.pollTimer = setInterval(() => { if (state.started && state.sync.enabled) syncPull(); }, 20000);
       }
       setTimeout(() => { if (state.started) syncPull(); }, 3000);
-      // мгновенный пул при возврате во вкладку / восстановлении сети:
+      // мгновенный цикл при возврате во вкладку / восстановлении сети:
       // рассинхрон между устройствами живёт секунды, а не минуты
       if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
         const kick = () => { if (state.started && state.sync.enabled && !syncCtl.busy) setTimeout(() => { if (state.sync.enabled) syncPull(); }, 1500); };
         window.addEventListener("focus", kick);
         window.addEventListener("online", kick);
         document.addEventListener("visibilitychange", () => { if (!document.hidden) kick(); });
+        // R31: вкладка ушла в фон — освобождаем аренду исполнителя (быстрая передача
+        // другому устройству/Стражу), иначе фоновые таймеры замедляются и торговля ждала бы
+        let hiddenAt = 0;
+        document.addEventListener("visibilitychange", () => {
+          if (document.hidden) { hiddenAt = Date.now(); }
+          else { hiddenAt = 0; maybeTakeHost(); }
+        });
+        if (typeof setInterval === "function") {
+          setInterval(() => {
+            if (document.hidden && hiddenAt && Date.now() - hiddenAt > 3 * 60000) releaseHost(); // фон > 3 мин — отдаём исполнительство
+          }, 60000);
+        }
         // финальная досылка при закрытии страницы: последнее состояние уезжает
-        // в облако через sendBeacon (не зависит от выгрузки документа)
+        // в облако через sendBeacon (не зависит от выгрузки документа).
+        // R31: beacon несёт СЛИТОЕ с сервером состояние — пишем только если серверный
+        // цикл был свежее 25 секунд (иначе можно перетереть чужие изменения), и
+        // освобождаем аренду исполнителя — вкладка закрывается.
         window.addEventListener("pagehide", () => {
           try {
             savePriceSnapshot(); // R30: цены последнего сеанса — на устройство
+            if (isAutoHost()) state.host = null; // аренда освобождается даже если beacon не пройдёт
             const local = archiveAccount();
             if (state.sync.sawRemote && isVirginArchive(local)) return;
+            if (Date.now() - lastCycleOkAt > 25000) return; // вид облака устарел — лучше не рисковать
             const fp = fpOf(local);
             if (fp === syncCtl.lastPushedFp) return;
             const j = JSON.stringify(trimForCloud(local));
@@ -992,7 +1112,11 @@ const Store = (() => {
   function onNotify(fn) { notifyBus.add(fn); return () => notifyBus.delete(fn); }
 
   function pushEvent(e, tsOverride) {
-    state.events = [{ ...e, id: `e${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, ts: tsOverride || Date.now() }, ...state.events].slice(0, 60);
+    // R31: явный id — для дедупликации. Одно и то же закрытие, исполненное двумя
+    // устройствами параллельно (защитные стопы/цели работают везде), даёт ОДИНАКОВЫЙ
+    // id события → слияние облака оставляет одну запись в ленте, а не две.
+    const id = e.id || `e${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    state.events = [{ ...e, id, ts: tsOverride || Date.now() }, ...state.events].slice(0, 60);
     if (e.notify && e.notify.kind && notifyBus.size) {
       const data = Object.assign({ title: e.title, body: e.detail || "", sym: e.sym }, e.notify.data || {});
       notifyBus.forEach((fn) => { try { fn(e.notify.kind, data); } catch (err) { /* noop */ } });
@@ -1950,8 +2074,12 @@ const Store = (() => {
     state.lastScanAt = Date.now(); // хартбит: сканер жив (виден в «Сигналах» и «Кабинете»)
     const price = (state.prices[sym] && state.prices[sym].price) || bars[bars.length - 1].c;
 
-    // 0) ИИ-автопилот: сканер всех монет, входы, флипы (спот-only, со скам-фильтром)
-    try { aiAutoStep(sym, bars); } catch (e) { console.error(e); }
+    // 0) ИИ-автопилот: сканер всех монет, входы, флипы (спот-only, со скам-фильтром).
+    //    R31: решения автопилота принимает ТОЛЬКО исполнитель (серверная аренда «host»):
+    //    иначе два устройства открывали бы одни и те же сделки параллельно. Защитные
+    //    выходы (стопы/цели/провал/безубыток) ниже работают на ВСЕХ устройствах —
+    //    их дубли схлопываются слиянием (могилки по pid + одинаковые id событий).
+    if (isAutoHost()) { try { aiAutoStep(sym, bars); } catch (e) { console.error(e); } }
 
     // 1) сигналы стратегий
     for (const strat of Engine.STRATEGIES) {
@@ -1972,6 +2100,7 @@ const Store = (() => {
       //    а на вспышках вход откладывается тем же анти-догоном, что и у ИИ
       if (!state.autoTrade) continue;
       if (state.mode === "live") continue;
+      if (!isAutoHost()) continue; // R31: вход лаборатории — только у исполнителя (иначе дубли позиций)
       const eq = Engine.entryQualityFromBars(bars, "лонг");
       if (!eq.ok) continue;
       const acc = state.labAccounts.find((a) => a.strategy === strat.id);
@@ -2062,6 +2191,7 @@ const Store = (() => {
       }
       for (const e of exits) {
         pushEvent({
+          id: "x" + pidOfClosed(e.closed), // R31: детерминированный id — двойное исполнение одного закрытия даёт ОДНО событие в ленте
           tone: e.closed.pnl >= 0 ? "bull" : "bear",
           title: `${e.pos.owner === "lab" ? "Лаборатория" : "Демо"}: ${e.pos.sym} закрыта ${e.closed.exitReason.toLowerCase()} · ${e.closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(e.closed.pnl)))} ХРЮ (≈ ${e.closed.pnl >= 0 ? "+" : "−"}$${Fmt.fmtNum(Math.abs(Math.round(e.closed.pnl)))})`,
           detail: `стратегия: ${(Engine.STRATEGIES.find((x) => x.id === e.pos.strategy) || { name: "вручную" }).name}`,
@@ -2189,6 +2319,10 @@ const Store = (() => {
   function catchUp() {
     if (!state.started || catchCtl.busy) return Promise.resolve(false);
     if (state.degraded) return Promise.resolve(false); // нет реальных источников — симуляция уже «живёт»
+    // R31: догоняет рынок ТОЛЬКО исполнитель. Пока открыто другое устройство или
+    // работает Страж, пропущенный период уже проигран серверным движком — его
+    // результат лежит в облаке и приедет ближайшим циклом синхронизации.
+    if (!claimHost("устройство · догон рынка")) return Promise.resolve(false);
     const now = Date.now();
     const since = state.lastCatchUp || (now - 10 * 60000);
     const gapMs = now - since;
@@ -2477,6 +2611,8 @@ const Store = (() => {
     enableSync, syncPush, syncPull, syncInfo, exportBackup, importBackup, archiveAccount,
     clearClosedHistory,
     effAuto,
+    // R31: серверный аккаунт — аренда исполнителя автоторговли
+    claimHost, releaseHost, isAutoHost, hostInfo: () => ({ host: hostActive(), me: deviceId || loadDeviceId(), isHost: isAutoHost() }),
     // внутренности для юнит-тестов
     _flipAllowed: flipAllowed, _riskGuard: riskGuard, _heatGuard: heatGuard, _aiLossStreak: aiLossStreak,
     _aiAutoStep: aiAutoStep, _engineStep: engineStep, _diagInfo: () => ({ count: diagCount, foreign: foreignCount }),
@@ -2484,7 +2620,7 @@ const Store = (() => {
     _diagReset: () => { lastDiagAt = 0; diagSeen.clear(); diagCount = 0; foreignCount = 0; }, // только для юнит-тестов
     _mergeArchives: mergeArchives, _applyArchive: applyArchive, _fpOf: fpOf, _diagError: diagError,
     _trimForCloud: trimForCloud, _isVirginArchive: isVirginArchive,
-    _persist: persist,
+    _persist: persist, _persistNow: persistNow,
     _priceSave: savePriceSnapshot, _priceRestore: restorePriceSnapshot, // R30: для тестов
     _genSimBars: genSimBars, _announceDegraded: announceDegraded, _announceRestored: announceRestored,
     _pairToSym: (p) => PAIR_TO_SYM[p] || null,
