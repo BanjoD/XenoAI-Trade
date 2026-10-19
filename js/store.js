@@ -59,6 +59,9 @@ const Store = (() => {
     rev: 0,             // ревизия состояния: растёт с каждой записью (для слияния синка устройств)
     aiCooldownUntil: 0, // пауза автопилота после серии минусов (до какого времени новые входы закрыты)
     aiCooldownSeen: 0,  // длина серии, на которую пауза УЖЕ отработана (иначе пауза продлевала бы сама себя вечно)
+    aiBan: {},          // R28: тайм-аут по монете после стопа ИИ: sym → до какого времени НЕ входить (тихий час 4ч)
+    aiLastEntryTs: 0,   // R28: когда автопилот ПОСЛЕДНИЙ раз открывал сделку (для снятия «заморозки» порога при простое)
+    aiRelaxAt: 0,       // R28: когда порог входа последний раз снижался из-за простоя (не чаще раза в 4 часа)
     clearedU: [],       // «могилки» очищенной истории пользователя (id удалённых закрытых сделок) — чтобы облако не воскресило их
     clearedL: [],       // «могилки» очищенной истории лаборатории
     sync: { code: null, enabled: false, lastPush: 0, lastPull: 0, lastError: null, lastSeenRev: 0, sawRemote: false }, // синхронизация устройств
@@ -102,7 +105,10 @@ const Store = (() => {
     if (!Number.isFinite(br.wins) || br.wins < 0) br.wins = 0;
     if (!Number.isFinite(br.losses) || br.losses < 0) br.losses = 0;
     if (!Number.isFinite(br.confThreshold)) br.confThreshold = 76;
-    br.confThreshold = Math.max(70, Math.min(88, Math.round(br.confThreshold)));
+    // R28: потолок 84 вместо 88 — при 88 уверенность ансамбля почти недостижима
+    // (нужно почти единогласие факторов) и автопилот замерает; 84 остаётся строгим,
+    // но проходимым. Старые значения 85–88 мягко сжимаются сюда при загрузке.
+    br.confThreshold = Math.max(70, Math.min(84, Math.round(br.confThreshold)));
     return br;
   }
 
@@ -316,6 +322,8 @@ const Store = (() => {
       maxDeal: s.maxDeal, maxTotal: s.maxTotal, aiPosMode: s.aiPosMode,
       lastCatchUp: s.lastCatchUp, lastScanAt: s.lastScanAt,
       aiCooldownUntil: s.aiCooldownUntil || 0, aiCooldownSeen: s.aiCooldownSeen || 0,
+      aiBan: s.aiBan && typeof s.aiBan === "object" ? s.aiBan : {},
+      aiLastEntryTs: s.aiLastEntryTs || 0, aiRelaxAt: s.aiRelaxAt || 0,
       clearedU: (s.clearedU || []).slice(-800), clearedL: (s.clearedL || []).slice(-800),
       // идеи сканера сохраняются: после перезапуска вкладки «Сигналы» сразу полные,
       // а не ждут 45с, пока сканер обойдёт все монеты заново
@@ -379,6 +387,14 @@ const Store = (() => {
     // не обнуляла её и не ставила заново (пауза честно отработана — серия зафиксирована)
     if (typeof d.aiCooldownUntil === "number" && d.aiCooldownUntil > 0) state.aiCooldownUntil = d.aiCooldownUntil;
     if (typeof d.aiCooldownSeen === "number" && d.aiCooldownSeen > 0) state.aiCooldownSeen = d.aiCooldownSeen;
+    // R28: тайм-ауты по монетам после стопов и метки простоя автопилота — тоже персистентны
+    if (d.aiBan && typeof d.aiBan === "object") {
+      const clean = {};
+      for (const k of Object.keys(d.aiBan)) if (typeof d.aiBan[k] === "number" && d.aiBan[k] > Date.now()) clean[k] = d.aiBan[k];
+      state.aiBan = { ...state.aiBan, ...clean }; // просроченные не resurrect — тихий час честно истекает
+    }
+    if (typeof d.aiLastEntryTs === "number" && d.aiLastEntryTs > (state.aiLastEntryTs || 0)) state.aiLastEntryTs = d.aiLastEntryTs;
+    if (typeof d.aiRelaxAt === "number" && d.aiRelaxAt > 0) state.aiRelaxAt = d.aiRelaxAt;
     // могилки очищенной истории: удалённое не имеет права воскреснуть из старого архива
     if (Array.isArray(d.clearedU)) state.clearedU = d.clearedU.slice(-800);
     if (Array.isArray(d.clearedL)) state.clearedL = d.clearedL.slice(-800);
@@ -456,6 +472,7 @@ const Store = (() => {
     state.aiAutoLive = false; // в реальном режиме автопилот всегда стартует выключенным
     state.lastCatchUp = 0; state.rev = 0; state.updatedAt = 0;
     state.aiCooldownUntil = 0; state.aiCooldownSeen = 0;
+    state.aiBan = {}; state.aiLastEntryTs = 0; state.aiRelaxAt = 0;
     state.clearedU = []; state.clearedL = [];
     state.sync = { code: null, enabled: false, lastPush: 0, lastPull: 0, lastError: null, lastSeenRev: 0, sawRemote: false };
     // sync-рантайм перезапускается для нового пользователя: метаданные читаются заново,
@@ -1389,15 +1406,29 @@ const Store = (() => {
       pushLesson(brain, `осторожнее с ${c.sym}: ${Math.abs(st.streak)} минуса подряд — уверенность на этой монете снижена`);
     }
 
-    // 3) калибровка порога входа — по ИИ-сделкам: если сигналы чаще закрываются в минус — ИИ требует больше уверенности
-    const winrate = brain.wins / brain.trades;
-    if (isAi && brain.trades >= 6) {
-      if (winrate < 0.45 && brain.confThreshold < 88) {
-        brain.confThreshold++;
-        pushLesson(brain, `поднял порог входа до ${brain.confThreshold}%: сигналы слишком часто закрывались в минус`);
-      } else if (winrate >= 0.62 && brain.confThreshold > 70) {
-        brain.confThreshold--;
-        pushLesson(brain, `снизил порог входа до ${brain.confThreshold}%: качество сигналов высокое`);
+    // 3) калибровка порога входа — по ОКНУ последних 12 ИИ-сделок, а НЕ по всей истории.
+    //    РАНЬШЕ (баг R28): винрейт считался за ВСЁ время — эпидемия минусов R26–R27
+    //    испортила статистику навсегда, порог полз вверх на каждом минусе (до 88) и
+    //    уже не мог вернуться: при 88 уверенность ансамбля почти недостижима, автопилот
+    //    замерал («не открывает сам сделки, только лабораторные» — кейс пользователя),
+    //    а лаборатория, которой порог не нужен, торговала. Окно само исцеляется: старые
+    //    минусы выходят из окна, и порог честно возвращается вниз.
+    if (isAi) {
+      const win = [];
+      for (const c of state.userClosed) {
+        if (c.strategy !== "ai") continue;
+        win.push(c.pnl >= 0 ? 1 : 0);
+        if (win.length >= 12) break;
+      }
+      if (win.length >= 6) {
+        const wrW = win.reduce((a, b) => a + b, 0) / win.length;
+        if (wrW < 0.4 && brain.confThreshold < 84) {
+          brain.confThreshold++;
+          pushLesson(brain, `поднял порог входа до ${brain.confThreshold}%: в последнем окне сделок профитов меньше 40%`);
+        } else if (wrW >= 0.6 && brain.confThreshold > 76) {
+          brain.confThreshold--;
+          pushLesson(brain, `снизил порог входа до ${brain.confThreshold}%: качество последних сделок хорошее`);
+        }
       }
     }
     brain.updatedAt = Date.now();
@@ -1464,6 +1495,25 @@ const Store = (() => {
   // но сам не торгует — включить его можно только явным действием с подтверждением риска.
   function effAuto() { return state.mode === "live" ? !!state.aiAutoLive : !!state.aiAuto; }
 
+  // R28: ТИХИЙ ЧАС ПО МОНЕТЕ после стопа ИИ — 4 часа без новых входов и флипов по этому
+  // символу (выходы/трейлинг/цели продолжают обслуживаться). Повторно собирать стоп на
+  // монете, где ИИ только что ошибся, — классика тильт-торговли; тайм-аут рвёт и эту
+  // привычку, и каскады «один откат — несколько стопов по одной монете».
+  const AI_STOP_BAN_MS = 4 * 3600e3;
+  function noteAiStopBan(sym) {
+    if (!sym) return;
+    if (!state.aiBan || typeof state.aiBan !== "object") state.aiBan = {};
+    const until = Date.now() + AI_STOP_BAN_MS;
+    if (state.aiBan[sym] && state.aiBan[sym] >= until) return; // бан уже активен на тот же срок — без дублей в ленте
+    state.aiBan[sym] = until;
+    pushEvent({
+      tone: "bear",
+      title: `ИИ взял тайм-аут по ${sym} на 4 часа после стопа`,
+      detail: "тихий час: новых входов и флипов по этой монете не будет, пока ИИ не перепроверит картину · открытые позиции и их защита (стоп/безубыток/цель) работают как обычно",
+      sym,
+    });
+  }
+
   function aiAutoStep(sym, bars) {
     if (!effAuto() || !bars || bars.length < 60) return;
 
@@ -1483,6 +1533,14 @@ const Store = (() => {
     const guard = combineGuard(sym);
     const rg = riskGuard(res);
     updateIdeas(sym, res, !guard.ok ? guard : !rg.ok ? rg : heatGuard());
+
+    // R28: ТИХИЙ ЧАС ПО МОНЕТЕ после стопа ИИ — ни новых входов, ни флипов по этому символу.
+    // Один и тот же сценарий (LINK, SOL) больше не будет собирать стопы повторно: монета,
+    // на которой ИИ только что ошибся, заслуживает паузу — картина факторов после стопа
+    // часто ещё «за» вход, но рынок уже показал, что расчёт неверен.
+    if (!state.aiBan || typeof state.aiBan !== "object") state.aiBan = {};
+    if (state.aiBan[sym] && Date.now() >= state.aiBan[sym]) delete state.aiBan[sym]; // срок вышел — тихий час честно истёк
+    if (state.aiBan[sym]) return;
 
     const aiPos = state.userPositions.find((p) => p.sym === sym && p.strategy === "ai");
     const aiCount = state.userPositions.filter((p) => p.strategy === "ai").length;
@@ -1511,6 +1569,7 @@ const Store = (() => {
         if (guard.ok && rg.ok && sc.size > 0) {
           aiOpenInternal(res, sc.size, true, "скам-фильтр, новости и риск-гвард ок");
           state._aiLastEntryAt = Date.now();
+          state.aiLastEntryTs = Date.now(); // R28: флип-вход тоже считается входом автопилота
         }
         persist();
         return;
@@ -1542,6 +1601,19 @@ const Store = (() => {
     }
     if (Date.now() < (state.aiCooldownUntil || 0)) return;
 
+    // R28: АНТИ-ЗАМОРОЗКА порога входа. Порог, задранный плохой историей (раньше — навсегда:
+    // расти мог, опускаться — только после серии профитов, которых нет без входов), теперь
+    // снижается сам при простое: если автопилот включён, но НЕ открывал сделок больше 24 часов,
+    // раз в 4 часа порог аккуратно опускается на 2 пункта до базовых 76. Торговля возобновляется,
+    // а калибровка на окне сделок дальше ведёт порог честно.
+    const thrNow = brain.confThreshold || 76;
+    if (thrNow > 76 && (state.aiLastEntryTs || 0) > 0 && Date.now() - state.aiLastEntryTs > 24 * 3600e3 && Date.now() - (state.aiRelaxAt || 0) > 4 * 3600e3) {
+      brain.confThreshold = Math.max(76, thrNow - 2);
+      state.aiRelaxAt = Date.now();
+      pushLesson(brain, `долго без новых входов (${Math.round((Date.now() - state.aiLastEntryTs) / 3600e3)} ч) — снизил порог входа до ${brain.confThreshold}%: строгий фильтр не должен замораживать торговлю`);
+      persist();
+    }
+
     // вход: уверенность ≥ обученного порога + факторы односторонни + все гварды + лимиты позиций и сумм.
     // РАЗГОНКА ВХОДОВ: не чаще одного нового входа автопилота в 8 минут — иначе один общий
     // импульс рынка набивал портфель одинаковыми лонгами, и один откат выбивал стопы
@@ -1554,6 +1626,7 @@ const Store = (() => {
       if (sc.size <= 0) return;
       aiOpenInternal(res, sc.size, true, "скам-фильтр, новости и риск-гвард ок");
       state._aiLastEntryAt = Date.now();
+      state.aiLastEntryTs = Date.now(); // R28: метка для анти-заморозки порога (персистентна)
       persist();
     }
   }
@@ -1728,6 +1801,7 @@ const Store = (() => {
       state.userClosed = [...userClosedAdd, ...state.userClosed].slice(0, 300);
       state.balance += userClosedAdd.reduce((sum, c) => sum + c.size + c.pnl, 0);
       for (const c of userClosedAdd) learnFromClosed(c); // ИИ учится на авто-выходах (стоп/цель/флип/безубыток)
+      for (const c of userClosedAdd) if (c.strategy === "ai" && c.exitReason === "Стоп") noteAiStopBan(c.sym); // R28: тихий час монете
       for (const c of labClosedAdd) learnFromClosed(c, true); // лаборатория тоже кормит общий мозг
       if (labClosedAdd.length) {
         state.labAccounts = state.labAccounts.map((a) => {
@@ -1867,6 +1941,7 @@ const Store = (() => {
     state.userClosed = [closed, ...state.userClosed].slice(0, 400);
     state.balance += closed.size + closed.pnl;
     learnFromClosed(closed);
+    if (closed.strategy === "ai" && reason === "Стоп") noteAiStopBan(pos.sym); // R28: тихий час монете (догоняющий движок)
     pushEvent({
       tone: closed.pnl >= 0 ? "bull" : "bear",
       title: `Пока вас не было: ${pos.sym} закрыта (${reason.toLowerCase()}) · ${closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))} ХРЮ`,
@@ -2171,6 +2246,7 @@ const Store = (() => {
     // внутренности для юнит-тестов
     _flipAllowed: flipAllowed, _riskGuard: riskGuard, _heatGuard: heatGuard, _aiLossStreak: aiLossStreak,
     _aiAutoStep: aiAutoStep, _engineStep: engineStep, _diagInfo: () => ({ count: diagCount, foreign: foreignCount }),
+    _noteAiStopBan: noteAiStopBan, _htfVeto: Engine.htfVeto,
     _diagReset: () => { lastDiagAt = 0; diagSeen.clear(); diagCount = 0; foreignCount = 0; }, // только для юнит-тестов
     _mergeArchives: mergeArchives, _applyArchive: applyArchive, _fpOf: fpOf, _diagError: diagError,
     _trimForCloud: trimForCloud, _isVirginArchive: isVirginArchive,

@@ -389,13 +389,28 @@ const Engine = (() => {
   // голосуют «лонг» сразу после пампа) — первый же откат выбивал стоп через
   // 7–13 минут, минусы шли каскадом по всему рынку. Причины: (1) последняя
   // свеча — всплеск (аномально шире ATR): вход по её закрытию = покупка вершины;
-  // (2) цена экстремально оторвалась от EMA50: тренд «перегрет», средняя далеко.
-  // В обоих случаях вход откладываем до выдоха/отката — wait с честным объяснением.
-  function entryQuality(a, lastBar, side) {
+  // (2) цена экстремально оторвалась от EMA50: тренд «перегрет», средняя далеко;
+  // (3) R28: три свечи ПОДРЯД в сторону входа с ХОДОМ > 2.5 ATR за 3 бара — вертикальная
+  // рампа: вход по её закрытию = покупка вершины (кейс R28: LINK и SOL лонгами на верху
+  // хода, оба стопа через ~6 минут одним общим откатом). Ровный тренд с обычными
+  // телами (ход ~2×ATR за 3 бара) проходит свободно — отсекается именно вертикаль.
+  // В этих случаях вход откладываем до выдоха/отката — wait с честным объяснением.
+  function entryQuality(a, lastBar, side, bars) {
     if (!a || !lastBar) return { ok: false, why: "нет данных" };
     const flash = a.atr > 0 ? (lastBar.h - lastBar.l) / a.atr : 0;
     if (flash > 1.8) {
       return { ok: false, why: `последняя свеча — всплеск ×${flash.toFixed(1)} к ATR: ждём выдох импульса, не догоняем памп` };
+    }
+    if (bars && bars.length >= 4 && a.atr > 0) {
+      const l3 = bars.slice(-3);
+      const netAtr = Math.abs(l3[2].c - l3[0].o) / a.atr; // чистый ход трёх баров в ATR
+      const up = l3.every((b) => b.c >= b.o), dn = l3.every((b) => b.c <= b.o);
+      if (side === "лонг" && up && netAtr > 2.5) {
+        return { ok: false, why: `три свечи вертикального разгона вверх (+${(netAtr * 100).toFixed(0)}% ATR-хода за 3 бара) — не покупаем верх рампы, ждём выдох/откат` };
+      }
+      if (side === "шорт" && dn && netAtr > 2.5) {
+        return { ok: false, why: `три свечи вертикального слива вниз (−${(netAtr * 100).toFixed(0)}% ATR-хода за 3 бара) — не шортим дно, ждём выдох/отскок` };
+      }
     }
     if (side === "лонг" && a.ema50Rel > 7) {
       return { ok: false, why: `цена на +${a.ema50Rel.toFixed(1)}% оторвалась от EMA50 — вход в догонку, ждём откат` };
@@ -409,7 +424,32 @@ const Engine = (() => {
     if (!bars || bars.length < 60) return { ok: false, why: "нет данных" };
     const a = analyzeBars(bars);
     if (!a) return { ok: false, why: "нет данных" };
-    return entryQuality(a, bars[bars.length - 1], side);
+    return entryQuality(a, bars[bars.length - 1], side, bars);
+  }
+
+  // ---- ЖЁСТКИЙ ФИЛЬТР СТАРШЕГО ТФ (R28) ----
+  // Главный источник стопов-минусов — вход ПРОТИВ явного часового тренда: контртрендовый
+  // лонг в падающем рынке (кейс R28: LINK и SOL лонгами в откате — стопы за ~6 минут).
+  // Если 1ч-картина однозначно направлена (фактор htf = ровно ±1) ПРОТИВ стороны входа —
+  // вход запрещён вовсе. Возвращает строку-причину для wait или null (можно входить).
+  function htfVeto(bars, side) {
+    if (!bars || bars.length < 60) return null;
+    const htfBars = toHigherTf(bars, 4);
+    if (htfBars.length < 25) return null;
+    const hCloses = htfBars.map((b) => b.c);
+    const hEma = Ind.emaSeries(hCloses, 20);
+    const hEmaV = hEma[hEma.length - 1];
+    const hEmaPrev = hEma[hEma.length - 4];
+    if (hEmaV == null || hEmaPrev == null) return null;
+    const price = hCloses[hCloses.length - 1];
+    const hRel = ((price - hEmaV) / hEmaV) * 100;
+    const hSlope = ((hEmaV - hEmaPrev) / hEmaPrev) * 100;
+    const dir = hRel > 0.4 && hSlope > 0 ? 1 : hRel < -0.4 && hSlope < 0 ? -1 : 0;
+    const sideSign = side === "шорт" ? -1 : 1;
+    if (dir === -sideSign) {
+      return `часовой тренд явно ${dir === -1 ? "нисходящий" : "восходящий"} (цена ${hRel >= 0 ? "+" : "−"}${Math.abs(hRel).toFixed(1)}% к EMA20, наклон ${hSlope >= 0 ? "+" : "−"}${Math.abs(hSlope).toFixed(2)}%) — против старшего ТФ не торгуем`;
+    }
+    return null;
   }
 
   function aiAnalyze(sym, bars, brain, newsItems, extra) {
@@ -440,6 +480,16 @@ const Engine = (() => {
     }
 
     const side = score > 0 ? "лонг" : "шорт";
+    const baseConf = Math.round(Math.max(50, Math.min(93, 54 + Math.abs(score) * 46 + (agreeShare - 0.5) * 24)));
+    const waitOut = (why, conf) => ({
+      sym, ts, verdict: "wait", confidence: conf,
+      price, stop: 0, target: 0, riskPct: atrPct * 1.2, atrPct, flashRatio, factors, score, agreeShare,
+      note: why,
+    });
+    // ЖЁСТКИЙ ФИЛЬТР СТАРШЕГО ТФ (R28): вердикт против явного тренда 1ч не торгуем —
+    // контртрендовые входы и есть главный источник быстрых стопов-минусов
+    const hv = htfVeto(bars, side);
+    if (hv) return waitOut(hv, Math.max(50, baseConf - 10));
     // стоп ≥ 0.5% от входа (УРОВЕНЬ «СУПЕР-УБЫТКА»): сделка закрывается в минус только
     // когда ход против неё очевидно провальный — много больше шума и комиссии 0.1%.
     // Цель 2R ≥ 1%: профит всегда существенно покрывает круговую комиссию.
@@ -447,16 +497,12 @@ const Engine = (() => {
     const stop = side === "лонг" ? price - risk : price + risk;
     const target = side === "лонг" ? price + risk * 2 : price - risk * 2;
     // уверенность: сила счёта + бонус за односторонность факторов − штраф за разноголосицу
-    const confidence = Math.round(Math.max(50, Math.min(93, 54 + Math.abs(score) * 46 + (agreeShare - 0.5) * 24)));
-    // АНТИ-ДОГОН: всплеск/перегрев — вход откладывается (verdict wait с объяснением);
+    const confidence = baseConf;
+    // АНТИ-ДОГОН: всплеск/перегрев/рампа — вход откладывается (verdict wait с объяснением);
     // автопилот, идеи и сигналы видят честную причину вместо слепого входа
-    const eq = entryQuality(a, bars[bars.length - 1], side);
+    const eq = entryQuality(a, bars[bars.length - 1], side, bars);
     if (!eq.ok) {
-      return {
-        sym, ts, verdict: "wait", confidence: Math.max(50, confidence - 12),
-        price, stop: 0, target: 0, riskPct: atrPct * 1.2, atrPct, flashRatio, factors, score, agreeShare,
-        note: eq.why,
-      };
+      return waitOut(eq.why, Math.max(50, confidence - 12));
     }
     const top = [...factors].sort((x, y) => Math.abs(y.dir * y.weight) - Math.abs(x.dir * x.weight)).slice(0, 3);
     return {
@@ -506,7 +552,7 @@ const Engine = (() => {
     }));
   }
 
-  return { STRATEGIES, analyzeBars, evalStrategy, evalExit, positionPnl, closeTrade, mkLabAccounts, aiAnalyze, aiFactorSnapshot, aiTrailStop, newsSentiment, AI_BASE_WEIGHTS, FEE_RATE, entryQuality, entryQualityFromBars };
+  return { STRATEGIES, analyzeBars, evalStrategy, evalExit, positionPnl, closeTrade, mkLabAccounts, aiAnalyze, aiFactorSnapshot, aiTrailStop, newsSentiment, AI_BASE_WEIGHTS, FEE_RATE, entryQuality, entryQualityFromBars, htfVeto };
 })();
 
 window.Engine = Engine;
