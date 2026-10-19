@@ -53,6 +53,7 @@ export class Room {
     this.globalBrain = null;
     this._ticking = false;
     this._lastPersistFp = null;
+    this._alarmSet = false;   // будильник автономной торговли уже проверен/взведён
     this._scanIdx = 0;
     this.lastTickAt = 0;
     this.lastTickOk = 0;
@@ -70,6 +71,11 @@ export class Room {
       this._login = await this.ctx.storage.get("login").catch(() => null);
     }
     if (this._login) await this.ctx.storage.put("login", this._login).catch(() => {});
+    // САМОЗАПУСК торговли: взводим будильник при первом же касании DO (любой запрос).
+    // Раньше первый alarm ставил только cron-тик, но у cron всего ~30 с на waitUntil —
+    // долгий тик (сеть бирж) гиб вместе с изолятoм, и торговля могла не начаться вовсе.
+    // Будильник alarm() исполняется в собственном контексте DO (до 15 мин) — надёжно.
+    await this.ensureAlarm();
     let stored = null;
     try { stored = await this.ctx.storage.get("state"); } catch (e) { /* новый DO */ }
     if (stored && validArchive(stored)) {
@@ -96,6 +102,16 @@ export class Room {
     if (this.globalBrain) {
       try { await this.ctx.storage.put("brain", this.globalBrain); } catch (e) { /* не критично */ }
     }
+  }
+
+  // будильник автономной торговли: если не взведён — взвести через TICK_MS
+  async ensureAlarm() {
+    if (this._alarmSet) return; // уже проверено в этом изоляте (alarm() перевзводит сам)
+    try {
+      const cur = await this.ctx.storage.getAlarm();
+      if (cur == null) await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
+      this._alarmSet = true;
+    } catch (e) { /* следующий запрос повторит попытку */ }
   }
 
   // ---------- миграция из textdb (одноразовая) ----------
@@ -316,6 +332,7 @@ export class Room {
 
   // ---------- alarm: само-возобновляющийся таймер автономной торговли ----------
   async alarm() {
+    this._alarmSet = true;
     try { await this.runTick(); } catch (e) { this.lastError = String((e && e.message) || e); }
     await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
   }
