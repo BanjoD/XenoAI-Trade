@@ -1,0 +1,167 @@
+# XenoAI Backend — автоматический деплой торгового сервера на Cloudflare Workers.
+#
+# ЧТО ДЕЛАЕТ (полностью автоматически, после того как вы добавите ОДИН секрет):
+#   1. проверяет наличие секрета CLOUDFLARE_API_TOKEN (нет — тихо пропускает);
+#   2. определяет account_id по токену;
+#   3. кладёт случайный ADMIN_TOKEN_SECRET в секреты воркера (одноразово);
+#   4. деплоит Worker + Durable Object (npx wrangler deploy);
+#   5. вытаскивает URL воркера и коммитит его в js/backend-config.js —
+#      платформа на GitHub Pages сразу начинает работать с сервером.
+#
+# НАСТРОЙКА (5 минут): см. BACKEND-SETUP.md в корне репозитория.
+
+name: XenoAI Backend Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "js/backend-config.js"
+      - ".github/workflows/deploy-backend.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: backend-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Проверка секрета
+        id: guard
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "$CF_TOKEN" ]; then
+            echo "::warning::Секрет CLOUDFLARE_API_TOKEN не задан — деплой пропущен (см. сводку справа, вкладка Summary)"
+            {
+              echo "## Деплой пропущен: нет секрета CLOUDFLARE_API_TOKEN"
+              echo ""
+              echo "Это НЕ ошибка — воркфлоу просто ждёт настройки. Сделайте 3 шага (5 минут):"
+              echo ""
+              echo "1. Создайте API-токен: https://dash.cloudflare.com/profile/api-tokens → **Create Token** → шаблон **Edit Cloudflare Workers** → Continue to summary → Create Token → скопируйте токен."
+              echo "2. Добавьте секрет: https://github.com/BanjoD/XenoAI-Trade/settings/secrets/actions → **New repository secret** → Name: \`CLOUDFLARE_API_TOKEN\`, Secret: вставьте токен → Add secret."
+              echo "3. Вернитесь сюда: **Run workflow** → **Run workflow**. Всё остальное сделается само."
+              echo ""
+              echo "Подробности — в BACKEND-SETUP.md (шаги 2–3)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Определить account_id по токену
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -e
+          ACC=$(curl -sf "https://api.cloudflare.com/client/v4/accounts" \
+            -H "Authorization: Bearer $CF_TOKEN" | node -e "
+            let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{
+              try { const j=JSON.parse(d);
+                if (j.success && j.result && j.result.length) console.log(j.result[0].id);
+                else { console.error('токен не видит ни одного аккаунта: ' + d.slice(0,300)); process.exit(1); }
+              } catch(e){ console.error('битый ответ CF API: ' + d.slice(0,300)); process.exit(1); }
+            });")
+          echo "ACCOUNT_ID=$ACC" >> "$GITHUB_ENV"
+          echo "account_id: $ACC"
+
+      - name: Случайный ADMIN_TOKEN_SECRET (одноразово)
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ env.ACCOUNT_ID }}
+        run: |
+          set -e
+          cd backend
+          npx --yes wrangler@latest secret list --name xenoai-trade-backend 2>/dev/null | tee /tmp/secrets.json || echo "[]" > /tmp/secrets.json
+          if ! grep -q "ADMIN_TOKEN_SECRET" /tmp/secrets.json; then
+            openssl rand -hex 32 > /tmp/token_secret.txt
+            npx --yes wrangler@latest secret put ADMIN_TOKEN_SECRET --name xenoai-trade-backend < /tmp/token_secret.txt
+            echo "ADMIN_TOKEN_SECRET создан (случайный, одноразовый)"
+          else
+            echo "ADMIN_TOKEN_SECRET уже существует — не трогаем (иначе все токены устройств истекут)"
+          fi
+
+      - name: Деплой Worker + Durable Object
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ env.ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ env.ACCOUNT_ID }}
+        run: |
+          set -e
+          cd backend
+          npx --yes wrangler@latest deploy 2>&1 | tee /tmp/deploy.log
+          # вытаскиваем URL из вывода wrangler
+          URL=$(grep -oE "https://[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev" /tmp/deploy.log | head -1 || true)
+          if [ -z "$URL" ]; then
+            # резервный путь: поддомен воркеров аккаунта
+            SUB=$(curl -sf "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/workers/subdomain" \
+              -H "Authorization: Bearer $CF_TOKEN" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log((j.result&&j.result.subdomain)||'')});")
+            URL="https://xenoai-trade-backend.$SUB.workers.dev"
+          fi
+          echo "BACKEND_URL=$URL" >> "$GITHUB_ENV"
+          echo "URL бэкенда: $URL"
+
+      - name: Проверка живости (/api/meta)
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          URL: ${{ env.BACKEND_URL }}
+        run: |
+          set -e
+          sleep 5
+          for i in 1 2 3 4 5; do
+            if curl -sf "$URL/api/meta" | tee /tmp/meta.json | grep -q '"ok":true'; then
+              echo "сервер живой:"; cat /tmp/meta.json; exit 0
+            fi
+            echo "попытка $i — сервер ещё прогревается…"; sleep 10
+          done
+          echo "::warning::/api/meta не ответил за 50 с — URL всё равно будет записан, проверьте позже"
+
+      - name: Записать URL в js/backend-config.js и закоммитить
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          URL: ${{ env.BACKEND_URL }}
+        run: |
+          set -e
+          git config user.name "xenoai-bot"
+          git config user.email "actions@users.noreply.github.com"
+          node -e "
+            const fs = require('fs');
+            let s = fs.readFileSync('js/backend-config.js', 'utf8');
+            s = s.replace(/url:\\s*\"[^\"]*\"/, 'url: ' + JSON.stringify(process.env.URL));
+            fs.writeFileSync('js/backend-config.js', s);
+          "
+          if git diff --quiet js/backend-config.js; then
+            echo "URL не изменился — коммит не нужен"
+          else
+            git add js/backend-config.js
+            git commit -m "backend: URL сервера XenoAI записан деплой-воркфлоу [skip ci]"
+            git push
+            echo "URL закоммичен — сайт (Vercel / GitHub Pages) пересоберётся автоматически"
+          fi
+          {
+            echo "## Сервер XenoAI задеплоен"
+            echo ""
+            echo "- **URL бэкенда:** $URL"
+            echo "- **Проверка вручную:** [$URL/api/meta]($URL/api/meta) → должно быть \`{\"ok\":true,...}\`"
+            echo "- Сайт пересоберётся сам (~1 мин). Затем: откройте платформу, **выйдите из аккаунта и войдите заново** (на каждом устройстве) — в «Кабинете» появится блок «Сервер XenoAI · автономная торговля 24/7»."
+            echo "- Старый «XenoAI Guardian» теперь будет отдыхать, пока сервер живой."
+          } >> "$GITHUB_STEP_SUMMARY"
