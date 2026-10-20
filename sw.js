@@ -4,7 +4,7 @@
    в симуляцию, но продолжает работать (кэш отдаёт оболочку приложения). */
 "use strict";
 
-const VERSION = "xenoai-v22";
+const VERSION = "xenoai-v23";
 const CORE = [
   "./",
   "./index.html",
@@ -120,28 +120,56 @@ self.addEventListener("notificationclick", (event) => {
   );
 });
 
-// настоящий push: события от Стража (Web Push, RFC 8292) — приходят, когда приложение закрыто
+// настоящий push: события от Стража (Web Push, RFC 8292) — приходят, когда приложение закрыто.
+// R47: ГЛУХИХ ОТКАЗОВ БОЛЬШЕ НЕТ. Раньше пуш без title молча игнорировался (if (!p.title)
+// return), а ошибка showNotification глоталась (.catch(() => {})) — сервер никогда не узнавал,
+// что устройство не показало уведомление. Теперь: (1) без title показываем фолбэк;
+// (2) успех/ошибка показа отправляется ack-ом на сервер (sub.lastAck — виден в модалке);
+// (3) по ack-ам видно главный диагноз: 201 от FCM есть, ack с устройства не пришёл =
+// пуш застрял на уровне OS/Chrome (разрешение, батарея, либо подписка чужого origin).
+const API_BASE = "https://xenoai-trade-backend.eldavidarz.workers.dev";
+
+async function ackPush(ok, err) {
+  try {
+    const sub = await self.registration.pushManager.getSubscription();
+    if (!sub || !sub.endpoint) return;
+    const tail = String(sub.endpoint).slice(-24);
+    await fetch(API_BASE + "/api/push-ack", { method: "POST", body: JSON.stringify({ tail, ok: Boolean(ok), err: String(err || "").slice(0, 120) }) });
+  } catch (e) { /* ack не критичен */ }
+}
+
 self.addEventListener("push", (event) => {
-  let p = {};
-  try { p = event.data ? event.data.json() : {}; } catch (e) { p = { title: event.data && event.data.text() }; }
-  if (!p.title) return;
-  event.waitUntil(
-    self.registration.showNotification(p.title, {
-      body: p.body || "",
-      tag: p.tag || undefined,
-      icon: "icons/icon-192.png",
-      badge: "icons/badge-96.png",
-      renotify: Boolean(p.tag),
-      silent: p.silent === true,
-      vibrate: p.silent === true ? undefined : [90, 45, 90],
-      data: { url: p.url || "./" },
-    }).then(() =>
-      // R42: сообщаем открытым окнам, что пуш реально доставлен на устройство —
-      // по всплывашке в приложении видно, что доставка работает, даже если
-      // системная шторка подавлена настройками Android
-      self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((cs) => {
-        for (const c of cs) { try { c.postMessage({ type: "push-shown", title: p.title, tag: p.tag || "" }); } catch (e) { /* noop */ } }
-      })
-    ).catch(() => {})
-  );
+  event.waitUntil((async () => {
+    let p = {};
+    try { p = event.data ? event.data.json() : {}; } catch (e) { try { p = { title: event.data && event.data.text() }; } catch (e2) { /* пустой payload */ } }
+    if (!p || typeof p !== "object" || !p.title) p = { title: "XenoAI Trade", body: "Новое событие сделки" }; // R47: фолбэк вместо молчания
+    let shown = false;
+    let errText = "";
+    try {
+      await self.registration.showNotification(p.title, {
+        body: p.body || "",
+        tag: p.tag || undefined,
+        icon: "icons/icon-192.png",
+        badge: "icons/badge-96.png",
+        renotify: Boolean(p.tag),
+        silent: p.silent === true,
+        vibrate: p.silent === true ? undefined : [90, 45, 90],
+        data: { url: p.url || "./" },
+      });
+      shown = true;
+    } catch (e) {
+      errText = String((e && e.message) || e);
+    }
+    // ack на сервер в ЛЮБОМ случае: ok=true — устройство показало; ok=false —
+    // SW проснулся, но показать не смог (текст ошибки уедет в модалку)
+    await ackPush(shown, shown ? "" : errText);
+    if (!shown) return;
+    // R42: сообщаем открытым окнам, что пуш реально доставлен на устройство —
+    // по всплывашке в приложении видно, что доставка работает, даже если
+    // системная шторка подавлена настройками Android
+    try {
+      const cs = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      for (const c of cs) { try { c.postMessage({ type: "push-shown", title: p.title, tag: p.tag || "" }); } catch (e) { /* noop */ } }
+    } catch (e) { /* noop */ }
+  })());
 });

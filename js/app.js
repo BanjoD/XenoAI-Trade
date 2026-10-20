@@ -941,7 +941,34 @@ const App = (() => {
           : '<span class="np-warn">на сервере нет подписок — включите пуши выше</span>';
         h.toast(sent ? "success" : "error",
           sent ? "Тестовый пуш отправлен сервером" : "Пуш не доставлен",
-          sent ? "Смотрите шторку уведомлений устройства — и всплывашку здесь, в приложении" : (detail || "нет подписок"));
+          sent ? "Смотрите шторку уведомлений устройства — и всплывашку здесь, в приложении. Через ~полминуты в строке подписки появится «устройство: показано», если SW его отобразил" : (detail || "нет подписок"));
+        break;
+      }
+      // R47: пересоздание подписки с нуля (застрявшая/битая регистрация, чужой origin)
+      case "notify:resub": {
+        if (!window.Notify || !Notify.resubscribe) break;
+        h.toast("info", "Пересоздаю подписку…", "отписываюсь от старой и создаю новую для этого домена");
+        Notify.resubscribe().then((r) => {
+          Notify.pushInfo().catch(() => {});
+          if (r && r.ok) h.toast("success", "Подписка пересоздана", "Новая подписка сохранена на сервере — тестовый пуш можно отправлять заново");
+          else h.toast("error", "Не удалось пересоздать", (r && r.why) || "попробуйте ещё раз");
+          refreshNotifyModal();
+        });
+        break;
+      }
+      // R47: удалить конкретную подписку с сервера (по хвосту endpoint)
+      case "notify:drop": {
+        if (!window.Server || !Server.active()) break;
+        const tailArg = String(arg || "");
+        if (tailArg.length < 6) break;
+        try {
+          const r = await Server.action("pushDrop", { tail: tailArg });
+          if (r && r.ok) {
+            if (window.Store) { Store.state.pushSubs = (Store.state.pushSubs || []).filter((s) => String(s.endpoint || "").slice(-tailArg.length) !== tailArg); }
+            h.toast("success", "Подписка удалена", "Сервер больше не будет слать пуши на мёртвый endpoint");
+          } else h.toast("error", "Не удалось удалить", (r && r.error) || "сервер недоступен");
+        } catch (e) { h.toast("error", "Не удалось удалить", String((e && e.message) || e)); }
+        refreshNotifyModal();
         break;
       }
       case "fs:toggle": {

@@ -222,7 +222,9 @@ const Notify = (() => {
         return { ok: false, why: "браузер вернул неполную подписку" };
       }
       if (window.Store && typeof Store.addPushSub === "function") {
-        const r = Store.addPushSub({ endpoint: raw.endpoint, keys: raw.keys });
+        // R47: origin обязателен — подписка жёстко привязана к домену, с которого
+        // создана (переезд xenoai-chi → xenotrade обесценил подписки старого origin)
+        const r = Store.addPushSub({ endpoint: raw.endpoint, keys: raw.keys, origin: String(location.origin || "") });
         if (!r.ok) return { ok: false, why: r.error || "подписка не сохранена" };
       }
       pushCache = { on: true, endpoint: raw.endpoint, why: "" };
@@ -234,6 +236,23 @@ const Notify = (() => {
       }
       pushCache = { on: false, endpoint: null, why: msg };
       return { ok: false, why: msg };
+    }
+  }
+
+  // R47: пересоздание подписки с нуля. Лечит случай, когда существующая подписка
+  // «застряла» (старый origin, битая регистрация в Chrome, ключи не совпадают):
+  // unsubscribe() + свежий subscribe + регистрация на сервере.
+  async function resubscribe() {
+    try {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (!reg) return { ok: false, why: "service worker ещё не готов — откройте приложение ещё раз" };
+      const old = await reg.pushManager.getSubscription();
+      if (old) { try { await old.unsubscribe(); } catch (e) { /* всё равно попробуем создать новую */ } }
+      pushCache = { on: false, endpoint: null, why: "пересоздаю подписку…" };
+      const r = await ensureSubscription();
+      return r;
+    } catch (e) {
+      return { ok: false, why: String((e && e.message) || e) };
     }
   }
 
@@ -282,7 +301,7 @@ const Notify = (() => {
         // живая подписка: перерегистрируем на сервере (heal потерь регистрации)
         if (window.Server && Server.active()) {
           const raw = sub.toJSON();
-          if (raw && raw.endpoint && raw.keys) Server.pushSub({ endpoint: raw.endpoint, keys: raw.keys });
+          if (raw && raw.endpoint && raw.keys) Server.pushSub({ endpoint: raw.endpoint, keys: raw.keys, origin: String(location.origin || "") });
         }
       } catch (e) { /* канал не критичен */ }
     }, 10 * 60000);
@@ -335,7 +354,7 @@ const Notify = (() => {
     init, EVENTS, getSettings() { return settings; },
     supported, permission, isIOS, isStandalone, iosNeedsInstall,
     enable, disable, setEvent, set, setMinPnl, test,
-    pushSupported, pushInfo, getPushCache, ensureSubscription, // R30: нативный Web Push
+    pushSupported, pushInfo, getPushCache, ensureSubscription, resubscribe, // R30/R47: нативный Web Push
     fsElement, fsSupported, toggleFullscreen,
   };
 })();

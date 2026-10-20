@@ -10,6 +10,7 @@
 
 import {
   AccountBrain, defaultArchive, normalizeBrain, validArchive, applyServerFields, fpOf, mergeArchives,
+  adoptBrain, mergeBrainGlobal, mergeShadowGlobal,
 } from "./account.js";
 import { fetchTickers, fetchKlines, fetchTickerOne, fetchAggTrades } from "./market.js";
 import { sendPush } from "./webpush.js";
@@ -20,7 +21,9 @@ const TEXTDB_BASE = "https://textdb.online/";
 const TICK_MS = 2 * 60000;       // тик ИИ каждые 2 минуты
 const NEWS_MS = 10 * 60000;      // новостная лента раз в 10 минут
 const SCAN_PER_TICK = 8;         // монет в скане за тик (ротация по кругу ≈ каждые 6-7 мин на монету)
-export const BUILD = "r46";
+const HUB_LOGIN = "__hub";       // R47: имя DO-хранилища ЕДИНОГО мозга ИИ (не аккаунт)
+const HUB_SYNC_MS = 4 * 60000;   // синхронизация с общим мозгом не чаще раза в 4 минуты
+export const BUILD = "r47";
 
 const PASSWORDS = { david: "ETH123aAgo", yura: "BTCmyB671" };
 
@@ -161,6 +164,14 @@ export class Room {
       this.brainObj = new AccountBrain(this.state, this.globalBrain || normalizeBrain(null), {
         fetchTickers, fetchKlines, fetchTickerOne, fetchAggTrades,
       });
+      // R47 — КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ ПАМЯТИ ИИ: AccountBrain делает normalizeBrain(brain)
+      // — это КОПИЯ, и всё обучение (learnFromClosed → веса/симстаты/порог/уроки) шло в неё.
+      // saveBrain() при этом сохранял this.globalBrain — ОРИГИНАЛ, который обучение не
+      // трогает. Итог: память ИИ НЕ ПЕРСИСТИЛАСЬ — каждый перезапуск DO (каждый деплой,
+      // выселение изолята) сбрасывал мозг к снапшоту textdb эпохи миграции. Теперь
+      // globalBrain указывает на РАБОЧИЙ объект мозга: сохраняется и отдаётся хабу ровно
+      // то, чему ИИ научился.
+      this.globalBrain = this.brainObj.brain;
       // восстановление цен из архива — ручным действиям не нужно ждать первого тика
       if (this.state.prices) {
         const now = Date.now();
@@ -183,6 +194,20 @@ export class Room {
     const path = url.pathname;
     const login = req.headers.get("x-login") || "";
     try {
+      // R47: синхронизация с ЕДИНЫМ мозгом ИИ. Вызывают ТОЛЬКО комнаты аккаунтов
+      // напрямую через биндинг ROOMS (внутренний маршрут, наружу не светится).
+      // Хранилище «__hub» — отдельный DO, не аккаунт: торговлю не ведёт, алармов не ставит.
+      if (path === "/brain-sync" && req.method === "POST") {
+        const body = await req.json().catch(() => null);
+        return json(await this.hubSync(body));
+      }
+      // R47: подтверждение от service worker устройства «пуш реально показан».
+      // Публичный роутер раздаёт его по комнатам аккаунтов без токена (SW не имеет
+      // сессии); в комнате матчим подписку по хвосту endpoint.
+      if (path === "/push-ack" && req.method === "POST") {
+        const body = await req.json().catch(() => null);
+        return json(this.pushAck(body || {}));
+      }
       if (path === "/state") {
         await this.loadState(login);
         const b = await this.ensureBrain();
@@ -307,6 +332,7 @@ export class Room {
       const preFp = this._lastPersistFp;
       await this.saveState();          // запись только если fp изменился
       await this.saveBrain();
+      await this.hubMaybeSync();       // R47: тяга/отдача общего мозга ИИ (дебаунс 4 мин)
       const pushes = await this.sendEvents(b.newEvents || []);
       b.newEvents = [];
       return {
@@ -379,6 +405,77 @@ export class Room {
       this.state.pushSubs = (this.state.pushSubs || []).filter((s) => !deadEndpoints.includes(s.endpoint));
     }
     return { results, sent: results.filter((r) => r.ok).length };
+  }
+
+  // ---------- R47: ЕДИНЫЙ МОЗГ ИИ — хаб-синхронизация ----------
+  // Носитель общего мозга — DO «__hub» (тот же класс Room, но не аккаунт: /brain-sync
+  // читает/пишет напрямую storage, не трогая аккаунт-стейт и не взводя алармы).
+  // Комната: отдаёт свой мозг+тень, получает слитый общий — и продолжает учиться на нём.
+  async hubSync(body) {
+    try {
+      const cur = await this.ctx.storage.get("gbrain").catch(() => null);
+      const curSh = await this.ctx.storage.get("gshadow").catch(() => null);
+      const g = normalizeBrain(cur || null);
+      const gs = mergeShadowGlobal(curSh && typeof curSh === "object" ? curSh : {}, null);
+      const inc = body && body.brain && typeof body.brain === "object" ? body.brain : null;
+      const incSh = body && body.shadow && typeof body.shadow === "object" ? body.shadow : null;
+      if (inc) mergeBrainGlobal(g, inc, String((body && body.from) || "?"));
+      if (incSh) mergeShadowGlobal(gs, incSh);
+      await this.ctx.storage.put("gbrain", g);
+      await this.ctx.storage.put("gshadow", gs);
+      return { ok: true, brain: g, shadow: gs };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  }
+
+  async hubMaybeSync() {
+    try {
+      if (!this.env || !this.env.ROOMS) return;           // Node-тесты без биндингов
+      if (this._login === HUB_LOGIN) return;              // хаб сам с собой не синхронизируется
+      const now = Date.now();
+      if (this._hubSyncAt && now - this._hubSyncAt < HUB_SYNC_MS) return;
+      this._hubSyncAt = now;
+      const sh = this.state && this.state.shadow ? this.state.shadow : {};
+      const payload = {
+        from: this._login || "?",
+        brain: this.globalBrain || null,
+        shadow: { stats: sh.stats || {}, trust: sh.trust || {}, skip: sh.skip || {} },
+      };
+      const stub = this.env.ROOMS.get(this.env.ROOMS.idFromName(HUB_LOGIN));
+      const r = await stub.fetch("https://room/brain-sync", { method: "POST", body: JSON.stringify(payload) });
+      const j = await r.json().catch(() => null);
+      if (!j || !j.ok) return;
+      // применяем общий мозг НА МЕСТЕ (AccountBrain держит ссылку на объект)
+      if (j.brain && this.globalBrain) {
+        adoptBrain(this.globalBrain, normalizeBrain(j.brain));
+        await this.saveBrain();
+      }
+      // общая тень (доверие по монетам/пропуски) — max-слияние в стейт аккаунта
+      if (j.shadow && this.state) {
+        const before = JSON.stringify(this.state.shadow && this.state.shadow.trust || {}) + JSON.stringify(this.state.shadow && this.state.shadow.skip || {});
+        mergeShadowGlobal(this.state.shadow = this.state.shadow || { list: [], stats: {}, trust: {}, skip: {} }, j.shadow);
+        const after = JSON.stringify(this.state.shadow.trust || {}) + JSON.stringify(this.state.shadow.skip || {});
+        if (before !== after) await this.saveState();
+      }
+    } catch (e) {
+      // хаб недоступен — не критично, повторим на следующем тике
+      try { this.tickLog.push("hubSync: " + String((e && e.message) || e).slice(0, 80)); } catch (e2) { /* noop */ }
+    }
+  }
+
+  // ---------- R47: ack от service worker устройства ----------
+  pushAck(body) {
+    const tail = String(body.tail || "");
+    if (tail.length < 6) return { ok: false, error: "tail" };
+    let matched = 0;
+    for (const s of (this.state && this.state.pushSubs) || []) {
+      if (String(s.endpoint || "").slice(-tail.length) !== tail) continue;
+      s.lastAck = { ts: Date.now(), ok: Boolean(body.ok), err: String(body.err || "").slice(0, 120) };
+      matched++;
+    }
+    if (matched) this.saveState().catch(() => {});
+    return { ok: true, matched };
   }
 
   // ---------- alarm: само-возобновляющийся таймер автономной торговли ----------

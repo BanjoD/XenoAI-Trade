@@ -137,6 +137,20 @@ export default {
         return jsonCors(await r.json(), r.status);
       }
 
+      // R47: ack от service worker устройства «пуш показан» — публичный (у SW нет
+      // сессии). Раздаём по ВСЕМ комнатам: какая найдёт у себя подписку с таким
+      // хвостом endpoint — та и запишет sub.lastAck (дошёл ли пуш до устройства).
+      if (path === "/api/push-ack" && req.method === "POST") {
+        const body = await req.text();
+        const j = JSON.parse(body || "{}");
+        const tail = String((j && j.tail) || "");
+        if (tail.length < 6 || tail.length > 64) return jsonCors({ ok: false, error: "tail" }, 400);
+        const safe = JSON.stringify({ tail, ok: Boolean(j.ok), err: String(j.err || "").slice(0, 120) });
+        const accounts = String(env.ACCOUNTS || "david,yura").split(",").map((s) => s.trim()).filter(Boolean);
+        const results = await Promise.all(accounts.map((login) => roomFetch(env, login, "/push-ack", { method: "POST", body: safe, headers: { "Content-Type": "application/json" } }).then((r) => r.json()).catch(() => ({ ok: false }))));
+        return jsonCors({ ok: true, matched: results.reduce((s, r) => s + (r && r.matched || 0), 0) });
+      }
+
       return jsonCors({ ok: false, error: "неизвестный маршрут: " + path }, 404);
     } catch (e) {
       return jsonCors({ ok: false, error: String((e && e.message) || e) }, 500);

@@ -59,6 +59,17 @@ export function fpOf(a) {
   const c0 = (a.userClosed || [])[0] || {};
   const e0 = (a.events || [])[0] || {};
   const cu = a.clearedU || [], cl = a.clearedL || [];
+  // R47: в отпечаток добавлены статус доставки подписок (last/lastAck) и тень
+  // (trust/skip) — раньше их мутации не меняли fp и НЕ ПЕРСИСТИЛИСЬ до ближайшего
+  // «настоящего» изменения баланса/позиций.
+  const sh = a.shadow || {};
+  const trKeys = Object.keys(sh.trust || {}).length;
+  const skKeys = Object.keys(sh.skip || {}).length;
+  // сумма содержимого trust/skip — иначе изменение ЗНАЧЕНИЙ при том же числе ключей не меняло fp
+  let trSum = 0, skSum = 0;
+  for (const k of Object.keys(sh.trust || {})) { const t = sh.trust[k] || {}; trSum += (Number(t.right) || 0) + (Number(t.wrong) || 0) + (Number(t.flat) || 0); }
+  for (const k of Object.keys(sh.skip || {})) skSum += Math.round((Number(sh.skip[k]) || 0) / 60000);
+  const st = sh.stats || {};
   return [
     a.balance,
     (a.userPositions || []).map((p) => p.id + ":" + (p.stop || 0) + ":" + (p.mt || 0)).sort().join(","),
@@ -68,8 +79,9 @@ export function fpOf(a) {
     cl.length + ":" + (cl.length ? cl[cl.length - 1] : ""),
     a.maxDeal, a.maxTotal, a.aiThreshold, a.aiPosMode,
     a.failPct,
-    (a.pushSubs || []).length,
+    (a.pushSubs || []).length + ":" + (a.pushSubs || []).map((s) => ((s.last && s.last.ts) || 0) + "." + ((s.lastAck && s.lastAck.ts) || 0)).join(","),
     a.mode, a.autoTrade ? 1 : 0, a.aiAuto ? 1 : 0, a.aiAutoLive ? 1 : 0,
+    "sh" + trKeys + ":" + trSum + ":" + skKeys + ":" + skSum + ":" + (Number(st.right) || 0) + "." + (Number(st.wrong) || 0) + "." + (Number(st.flat) || 0),
   ].join("|");
 }
 
@@ -249,6 +261,134 @@ export function normalizeShadow(s) {
     }
   }
   return out;
+}
+
+// ================= R47: ЕДИНЫЙ МОЗГ ИИ (один на все аккаунты и режимы) =================
+// Требование пользователя: «ИИ один общий для всех и всего» — знания, полученные на
+// демо-сделках, лаборатории и тени ЛЮБОГО аккаунта, применяются в реальной торговле
+// ВСЕХ аккаунтов. Носитель общего мозга — отдельный Durable Object «__hub» (один
+// писатель, сильная консистентность); комнаты синхронизируются с ним по /brain-sync.
+
+// Adopt: заменить содержимое target содержимым src С СОХРАНЕНИЕМ ссылок target
+// (AccountBrain держит ссылку на объект мозга — заменять сам объект нельзя, только
+// мутировать поля, иначе рантайм продолжит читать старую память).
+export function adoptBrain(t, s) {
+  const deep = (a, b) => {
+    for (const k of Object.keys(a)) if (!(k in b)) delete a[k];
+    for (const k of Object.keys(b)) {
+      const v = b[k];
+      if (v && typeof v === "object" && !Array.isArray(v) && a[k] && typeof a[k] === "object" && !Array.isArray(a[k])) deep(a[k], v);
+      else a[k] = Array.isArray(v) ? v.slice() : (v && typeof v === "object" ? Object.assign({}, v) : v);
+    }
+    return a;
+  };
+  return deep(t, s || {});
+}
+
+const clampRel = (x) => Math.max(0.55, Math.min(1.5, x));
+
+// Слияние мозга аккаунта (inc) в глобальный (g). Правила:
+//  - счётчики сделок — по-контрибуторский max (монотонность, идемпотентность);
+//  - веса факторов rel — α-смешение по объёму сделок (α 0.1…0.5, без резких скачков);
+//  - symStats — max по n/wins, стрик по большей |streak| (консервативно);
+//  - порог входа — то же α-смешение с капами 70…80;
+//  - флаги и уроки — объединение.
+export function mergeBrainGlobal(g, inc, from) {
+  if (!g || !inc || typeof inc !== "object") return g;
+  const contrib = (g.contrib = g.contrib || {});
+  const cKey = String(from || "?").slice(0, 24);
+  const c = contrib[cKey] = contrib[cKey] || { trades: 0, wins: 0, losses: 0 };
+  const mx = (a, b) => (Number.isFinite(a) && a >= b ? a : b);
+  c.trades = mx(c.trades, Number(inc.trades) || 0);
+  c.wins = mx(c.wins, Number(inc.wins) || 0);
+  c.losses = mx(c.losses, Number(inc.losses) || 0);
+  let gTrades = 0, gWins = 0, gLosses = 0;
+  for (const k of Object.keys(contrib)) { gTrades += contrib[k].trades || 0; gWins += contrib[k].wins || 0; gLosses += contrib[k].losses || 0; }
+  g.trades = gTrades; g.wins = gWins; g.losses = gLosses;
+  // α: вклад входящего мозга тем больше, чем больше у него своих сделок
+  const incTrades = (Number(inc.trades) || 0) || (Number(inc.wins) || 0) + (Number(inc.losses) || 0);
+  const alpha = Math.max(0.1, Math.min(0.5, incTrades / (incTrades + gTrades || 1)));
+  if (inc.rel && typeof inc.rel === "object") {
+    const rel = (g.rel = g.rel || {});
+    for (const k of Object.keys(inc.rel)) {
+      const v = Number(inc.rel[k]);
+      if (!Number.isFinite(v)) continue;
+      const cur = Number.isFinite(rel[k]) ? rel[k] : 1;
+      rel[k] = clampRel(cur + (v - cur) * alpha);
+    }
+  }
+  if (inc.symStats && typeof inc.symStats === "object") {
+    const st = (g.symStats = g.symStats || {});
+    for (const k of Object.keys(inc.symStats)) {
+      const s = inc.symStats[k];
+      if (!s || typeof s !== "object") continue;
+      const cur = st[k];
+      if (!cur || (Number(s.n) || 0) >= (Number(cur.n) || 0)) st[k] = { n: Number(s.n) || 0, wins: Number(s.wins) || 0, streak: Number(s.streak) || 0, avgPct: Number(s.avgPct) || 0 };
+    }
+  }
+  if (Number.isFinite(Number(inc.confThreshold)) && Number(inc.confThreshold) > 0) {
+    const target = Math.max(70, Math.min(80, Math.round(Number(inc.confThreshold))));
+    const cur = Math.max(70, Math.min(80, Math.round(Number(g.confThreshold) || 74)));
+    g.confThreshold = Math.max(70, Math.min(80, Math.round(cur + (target - cur) * alpha)));
+  }
+  if (inc.wFlags && typeof inc.wFlags === "object") {
+    const wf = (g.wFlags = g.wFlags || {});
+    for (const k of Object.keys(inc.wFlags)) if (inc.wFlags[k]) wf[k] = 1;
+  }
+  if (Array.isArray(inc.lessons) && inc.lessons.length) {
+    const seen = new Set((g.lessons || []).map((l) => l && l.text));
+    for (const l of inc.lessons.slice(0, 40)) {
+      if (!l || !l.text || seen.has(l.text)) continue;
+      seen.add(l.text);
+      g.lessons = [{ ts: Number(l.ts) || Date.now(), text: String(l.text).slice(0, 220) }, ...g.lessons];
+    }
+    g.lessons = g.lessons.sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 30);
+  }
+  if ((Number(inc.shadowWrong) || 0) > (Number(g.shadowWrong) || 0)) g.shadowWrong = Number(inc.shadowWrong) || 0;
+  if ((Number(inc.shadowTuneAt) || 0) > (Number(g.shadowTuneAt) || 0)) g.shadowTuneAt = Number(inc.shadowTuneAt) || 0;
+  g.updatedAt = Date.now();
+  return g;
+}
+
+// Слияние тени (доверие по монетам, пропуски скана, агрегаты) — max-слияние
+// монотонных счётчиков; adj пересчитывается по единой формуле trustAdjFrom.
+export function mergeShadowGlobal(g, inc) {
+  if (!g || typeof g !== "object") g = {};
+  if (!inc || typeof inc !== "object") return g;
+  const mx = (a, b) => (Number.isFinite(a) && a >= b ? a : b);
+  if (inc.stats && typeof inc.stats === "object") {
+    const st = (g.stats = g.stats || {});
+    for (const k of ["right", "wrong", "flat", "avoidedSum", "avoidedN"]) st[k] = mx(Number(st[k]) || 0, Number(inc.stats[k]) || 0);
+    const since = Number(inc.stats.since) || 0;
+    if (since && (!st.since || since < st.since)) st.since = since;
+  }
+  if (inc.trust && typeof inc.trust === "object") {
+    const tr = (g.trust = g.trust || {});
+    for (const k of Object.keys(inc.trust)) {
+      const t = inc.trust[k];
+      if (!t || typeof t !== "object") continue;
+      const cur = tr[k] || {};
+      const merged = {
+        right: mx(Number(cur.right) || 0, Number(t.right) || 0),
+        wrong: mx(Number(cur.wrong) || 0, Number(t.wrong) || 0),
+        flat: mx(Number(cur.flat) || 0, Number(t.flat) || 0),
+        ts: Math.max(Number(cur.ts) || 0, Number(t.ts) || 0),
+      };
+      merged.adj = trustAdjFrom(merged);
+      tr[String(k).slice(0, 12)] = merged;
+    }
+  }
+  if (inc.skip && typeof inc.skip === "object") {
+    const sk = (g.skip = g.skip || {});
+    const now = Date.now();
+    for (const k of Object.keys(inc.skip)) {
+      const until = Number(inc.skip[k]);
+      if (!Number.isFinite(until) || until <= now) continue;
+      if (!sk[k] || until > Number(sk[k])) sk[String(k).slice(0, 12)] = until;
+    }
+    for (const k of Object.keys(sk)) if (Number(sk[k]) <= now) delete sk[k];
+  }
+  return g;
 }
 
 // ================= свежее состояние аккаунта =================
@@ -1332,13 +1472,43 @@ export class AccountBrain {
         const sub = p.sub;
         if (!sub || typeof sub.endpoint !== "string" || sub.endpoint.indexOf("https://") !== 0
           || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) return { ok: false, error: "подписка неполная" };
+        // R47: origin домена, создавшего подписку. КРИТИЧНО после переезда
+        // xenoai-chi.vercel.app → xenotrade.vercel.app: PushSubscription, localStorage
+        // и разрешение привязаны к origin — подписка старого домена мертва для нового.
+        let origin = "";
+        try { origin = new URL(String(sub.origin || "")).origin; } catch (e) { origin = ""; }
         const rest = (a.pushSubs || []).filter((s) => s.endpoint !== sub.endpoint);
-        rest.unshift({ endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth }, ts: Date.now(), ua: String(p.ua || "").slice(0, 140) });
+        rest.unshift({ endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth }, ts: Date.now(), ua: String(p.ua || "").slice(0, 140), origin });
         a.pushSubs = rest.slice(0, 8);
         return { ok: true };
       }
       case "pushUnsub": {
         a.pushSubs = (a.pushSubs || []).filter((s) => s.endpoint !== p.endpoint);
+        return { ok: true };
+      }
+      case "pushDrop": {
+        // R47: удалить подписки по хвосту endpoint (кнопка «убрать старый домен» в модалке)
+        const tail = String(p.tail || "");
+        if (tail.length < 6) return { ok: false, error: "короткий хвост" };
+        const before = (a.pushSubs || []).length;
+        a.pushSubs = (a.pushSubs || []).filter((s) => String(s.endpoint || "").slice(-tail.length) !== tail);
+        return { ok: true, removed: before - (a.pushSubs || []).length };
+      }
+      case "liveOrder": {
+        // R47 (аудит реального режима): реальный ордер с устройства теперь записывается
+        // в аккаунт на сервере — история живёт на всех устройствах, событие live_order
+        // (с пушем «Реальные ордера») генерирует СЕРВЕР, а не только браузер вкладки.
+        const o = p.order;
+        if (!o || typeof o.sym !== "string" || (o.side !== "лонг" && o.side !== "шорт")) return { ok: false, error: "ордер неполный" };
+        const amt = Number(o.amountUSDT);
+        if (!Number.isFinite(amt) || amt <= 0 || amt > 1e9) return { ok: false, error: "некорректная сумма ордера" };
+        a.liveOrders = [{ sym: String(o.sym).slice(0, 16), side: o.side, amountUSDT: amt, exchange: String(o.exchange || "?").slice(0, 24), note: String(p.note || "").slice(0, 80), ts: Date.now() }, ...(a.liveOrders || [])].slice(0, 50);
+        this.pushEvent({
+          tone: o.side === "лонг" ? "bull" : "bear",
+          title: `Реальный ордер: ${String(o.sym).slice(0, 16)} ${o.side === "лонг" ? "BUY" : "SELL"}`,
+          detail: `${Fmt.fmtNum(Math.round(amt))} USDT · ${String(o.exchange || "?").slice(0, 24)} · исполнен на бирже с устройства`,
+          notify: { kind: "live_order" },
+        });
         return { ok: true };
       }
       default: return { ok: false, error: "неизвестное действие: " + type };

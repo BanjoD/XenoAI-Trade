@@ -1199,16 +1199,20 @@ const Store = (() => {
   function addPushSub(sub) {
     if (!sub || typeof sub.endpoint !== "string" || sub.endpoint.indexOf("https://") !== 0
       || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) return { ok: false, error: "подписка неполная" };
+    // R47: origin домена, создавшего подписку, сохраняется и в стейт, и на сервере —
+    // модалка сравнивает его с текущим доменом (переезд xenoai-chi → xenotrade)
+    const origin = String(sub.origin || (typeof location !== "undefined" && location.origin) || "");
     const rest = (state.pushSubs || []).filter((s) => s.endpoint !== sub.endpoint);
     rest.unshift({
       endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth },
       ts: Date.now(), ua: (typeof navigator !== "undefined" && navigator.userAgent || "").slice(0, 140),
+      origin,
     });
     state.pushSubs = rest.slice(0, 8);
     // R32: подписка немедленно регистрируется НА СЕРВЕРЕ (пуши шлёт сервер) —
     // и не зависит от синхронизации текстового облака
     if (serverMode()) {
-      try { Server.pushSub({ endpoint: sub.endpoint, keys: sub.keys }, (typeof navigator !== "undefined" && navigator.userAgent || "")); } catch (e) { /* пуш не критичен */ }
+      try { Server.pushSub({ endpoint: sub.endpoint, keys: sub.keys, origin }, (typeof navigator !== "undefined" && navigator.userAgent || "")); } catch (e) { /* пуш не критичен */ }
     }
     pushEvent({
       tone: "neutral",
@@ -1583,6 +1587,16 @@ const Store = (() => {
   }
 
   function recordLiveOrder(order, note) {
+    // R47: реальный ордер теперь и на СЕРВЕРЕ (история живёт в аккаунте, а не в
+    // localStorage одного браузера; событие live_order уходит и пушем на устройства).
+    // Аудит реального режима: раньше запись была только локальной — при смене
+    // устройства/чистке браузера история реальных ордеров терялась безвозвратно.
+    if (serverMode()) {
+      return serverAction("liveOrder", { order, note: note || "" }, () => recordLiveOrderLocal(order, note));
+    }
+    return recordLiveOrderLocal(order, note);
+  }
+  function recordLiveOrderLocal(order, note) {
     state.liveOrders = [{ ...order, note: note || "", ts: Date.now() }, ...state.liveOrders].slice(0, 50);
     pushEvent({ tone: order.side === "лонг" ? "bull" : "bear", title: `Реальный ордер отправлен: ${order.sym} ${order.side === "лонг" ? "BUY" : "SELL"}`, detail: `${Fmt.fmtNum(Math.round(order.amountUSDT))} USDT · ${order.exchange}`, notify: { kind: "live_order" } });
     persist(); emit();

@@ -1161,21 +1161,49 @@ const ViewsTrade = (() => {
     // ---- push на смартфон: нативный Web Push (R30) — только разрешение, ничего больше ----
     const pc = Notify.getPushCache ? Notify.getPushCache() : { on: false, why: "" };
     const epTail = pc.endpoint ? String(pc.endpoint).slice(-14) : "";
-    // R42: статус подписок на сервере + результат последней доставки (room.js пишет sub.last)
+    // R47: статус подписок на сервере: доставка сервера (sub.last, HTTP-статус FCM)
+    // И подтверждение устройства (sub.lastAck — пришёл ли ack от service worker).
+    // Пара «201 есть, ack нет» = пуш застрял на уровне OS/Chrome либо подписка
+    // принадлежит ЧУЖОМУ origin (переезд домена xenoai-chi → xenotrade).
     const srvSubs = (window.Store && Store.state.pushSubs) || [];
+    const deviceOrigin = String(location.origin || "");
+    const hhOf = (ts) => { const t = new Date(ts); return String(t.getHours()).padStart(2, "0") + ":" + String(t.getMinutes()).padStart(2, "0"); };
+    const hostOf = (o) => { try { return new URL(o).host; } catch (e) { return ""; } };
     const srvList = srvSubs.map((s) => {
       const tail = h.esc(String(s.endpoint || "").slice(-14));
-      if (s.last && s.last.ts) {
-        const t = new Date(s.last.ts);
-        const hh = String(t.getHours()).padStart(2, "0") + ":" + String(t.getMinutes()).padStart(2, "0");
-        return `<span class="${s.last.ok ? "np-ok" : "np-warn"}">${tail} · ${hh} · HTTP ${s.last.status || "—"}</span>`;
-      }
-      return `<span class="np-warn">${tail} · доставок ещё не было</span>`;
-    }).join(" · ");
+      const sOrigin = String(s.origin || "");
+      const originTag = sOrigin
+        ? (sOrigin === deviceOrigin ? `<span class="np-ok">этот домен</span>` : `<span class="np-warn">чужой: ${h.esc(hostOf(sOrigin) || sOrigin)}</span>`)
+        : `<span class="np-warn">домен неизвестен</span>`;
+      const send = s.last && s.last.ts
+        ? `<span class="${s.last.ok ? "np-ok" : "np-warn"}">сервер: ${hhOf(s.last.ts)} · HTTP ${s.last.status || "—"}</span>`
+        : `<span class="np-warn">сервер: отправок не было</span>`;
+      const ack = s.lastAck && s.lastAck.ts
+        ? (s.lastAck.ok
+          ? `<span class="np-ok">устройство: показано ${hhOf(s.lastAck.ts)}</span>`
+          : `<span class="np-warn">устройство: ошибка показа — ${h.esc(s.lastAck.err || "?")}</span>`)
+        : `<span class="np-warn">устройство: без подтверждения</span>`;
+      return `<div class="ai-limit-row" style="flex-wrap:wrap;gap:6px;align-items:center;padding:3px 0">`
+        + `<span class="num" style="font-size:11.5px">…${tail}</span> ${originTag} · ${send} · ${ack}`
+        + `<button class="btn-ghost" style="padding:2px 8px;font-size:11px" data-action="notify:drop" data-arg="${h.esc(String(s.endpoint || "").slice(-24))}" title="Удалить эту подписку с сервера">убрать</button>`
+        + `</div>`;
+    }).join("");
+    // R47: главная подсказка после переезда домена: на сервере есть подписки, но ни одна
+    // не принадлежит текущему домену, и само устройство подписки не имеет.
+    const foreignSubs = srvSubs.filter((s) => !s.origin || s.origin !== deviceOrigin);
+    const needResubHere = !pc.on && srvSubs.length > 0 && foreignSubs.length === srvSubs.length;
+    const migrateBanner = needResubHere ? `
+      <div class="notify-install" style="border:1px solid rgba(255,45,120,.45);background:rgba(255,45,120,.08)">
+        <b>Домен платформы переехал</b> (xenoai-chi.vercel.app → ${h.esc(hostOf(deviceOrigin) || deviceOrigin)}).
+        Подписки на пуши, разрешение и настройки уведомлений привязаны к домену — на старом они остались,
+        поэтому сервер отправляет пуши в пустоту (HTTP 201 есть — уведомлений нет). Включите уведомления
+        здесь — это одно нажатие: разрешение + новая подписка для этого домена.
+      </div>` : "";
     const pushHtml = `
       <div class="notify-sec">Push на смартфон · даже при закрытом приложении</div>
+      ${migrateBanner}
       <div class="notify-install">
-        Пуши приходят <b>нативным механизмом браузера</b> — никаких сторонних приложений и настроек. Достаточно один раз <b>разрешить уведомления</b> выше: устройство само подписывается на пуши платформы, подписка синхронизируется в облако аккаунта, и <b>Страж (каждые 15 минут)</b> присылает сюда события сделок — входы ИИ, цели, провалы, флипы, авто-стоп — даже когда приложение полностью закрыто и выгружено из памяти. Пока приложение открыто, уведомления приходят мгновенно.
+        Пуши приходят <b>нативным механизмом браузера</b> — никаких сторонних приложений и настроек. Достаточно один раз <b>разрешить уведомления</b> выше: устройство само подписывается на пуши платформы, подписка синхронизируется в облако аккаунта, и сервер присылает сюда события сделок — входы ИИ, цели, провалы, флипы, авто-стоп — даже когда приложение полностью закрыто и выгружено из памяти. Пока приложение открыто, уведомления приходят мгновенно.
       </div>
       <div class="ai-limit-row" style="flex-wrap:wrap;gap:8px">
         <span class="lbl">${h.icon("radio", 12)} это устройство</span>
@@ -1185,18 +1213,20 @@ const ViewsTrade = (() => {
             ? `<span class="np-warn">${h.esc(pc.why)}</span>`
             : `<span class="np-warn">подписка не создана</span>`}
         ${pc.on
-          ? ""
+          ? `<button class="btn-ghost" data-action="notify:resub" title="Отписаться и создать подписку заново (лечит застрявшие/битые регистрации)">${h.icon("bell", 13)} Пересоздать подписку</button>`
           : `<button class="btn-lime" data-action="notify:push-enable" title="Создать подписку Web Push для этого устройства">${h.icon("bell", 13)} Подписать на пуши</button>`}
       </div>
       <div class="ai-limit-row" style="flex-wrap:wrap;gap:8px">
         <span class="lbl">${h.icon("wallet", 12)} сервер</span>
-        ${srvSubs.length ? `<span style="display:inline-flex;flex-wrap:wrap;gap:8px">${srvList}</span>` : `<span class="np-warn">на сервере нет подписок — включите пуши выше</span>`}
+        ${srvSubs.length
+          ? `<div style="width:100%">${srvList}</div>`
+          : `<span class="np-warn">на сервере нет подписок — включите пуши выше</span>`}
       </div>
       <div class="ai-limit-row" style="flex-wrap:wrap;gap:8px">
         <button class="btn-lime" data-action="notify:push-test" title="Сервер отправит настоящий пуш по подпискам аккаунта">${h.icon("bell", 13)} Тестовый пуш с сервера</button>
         <span id="push-test-result"></span>
       </div>
-      <div class="ai-limit-note">После переустановки приложения или очистки данных браузера подписка обновится сама при первом запуске — нажимать ничего не нужно (кнопка «Подписать» — на случай, если что-то пошло не так). Тестовый пуш показывает честный статус доставки: <b>HTTP 201</b> — сервер отправил, браузер устройства получил. С r46 все торговые пуши идут с <b>высоким приоритетом</b> (Urgency: high) — они будят устройство и приходят при закрытом приложении, даже в режиме энергосбережения Android. Если 201 есть, а в шторке пусто: (1) Android 13+ — включите уведомления для самого Chrome: Настройки → Приложения → Chrome → Уведомления; (2) агрессивная экономия батареи (Xiaomi/Samsung/Huawei) душит Chrome в фоне — Настройки → Приложения → Chrome → Батарея → «Без ограничений»; (3) проверьте, не замучен ли сайт в Chrome (замок в адресной строке → Уведомления); (4) iPhone — пуши только в приложении, установленном на «Домой». <b>HTTP 410</b> — подписка устарела: нажмите «Подписать на пуши».</div>`;
+      <div class="ai-limit-note">Диагностика теперь двухсторонняя: <b>«сервер: HTTP 201»</b> — пуш принят сервисом доставки (FCM); <b>«устройство: показано»</b> — service worker устройства реально показал уведомление и подтвердил это серверу (r47). Все торговые пуши идут с <b>высоким приоритетом</b> (Urgency: high, TTL 12 ч) — будят устройство даже в Doze. Если 201 есть, а подтверждения устройства нет — пуш застрял на уровне Android/Chrome: (1) домен переехал — включите уведомления на этом домене (баннер выше); (2) Android 13+ — включите уведомления для самого Chrome: Настройки → Приложения → Chrome → Уведомления; (3) агрессивная экономия батареи (Xiaomi/Samsung/Huawei) душит Chrome в фоне — Настройки → Приложения → Chrome → Батарея → «Без ограничений»; (4) проверьте, не замучен ли сайт в Chrome (замок в адресной строке → Уведомления); (5) не помогает — нажмите «Пересоздать подписку». <b>HTTP 410</b> — подписка устарела: пересоздаётся сама или кнопкой выше.</div>`;
 
     const actionsHtml = `
       <div class="notify-actions">
