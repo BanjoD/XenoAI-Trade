@@ -233,16 +233,19 @@ const Views = (() => {
     const aiReal = closed.filter((c) => c.strategy === "ai").reduce((a, c) => a + c.pnl, 0);
     const aiFloat = open.filter((p) => p.strategy === "ai").reduce((a, p) => a + floatOf(p), 0);
     const cls = (v) => (v > 0 ? "text-green" : v < 0 ? "text-red" : "");
+    const live = s.mode === "live"; // R52: реальный рынок — суммы в USDT
+    const amt = (v, sign, cls2) => live ? h.usdAmount(v, sign, cls2) : h.hruAmount(v, sign, cls2);
     return `<section class="card card-pad">
-      ${h.sectionTitle("Результат сделок · плюс/минус", `<span style="font-size:12px;color:#71717a">реальные цены · курс 1 ХРЮ = $1</span>`)}
+      ${h.sectionTitle("Результат сделок · плюс/минус", `<span style="font-size:12px;color:#71717a">${live ? "реальный рынок · суммы в USDT" : "реальные цены · курс 1 ХРЮ = $1"}</span>`)}
       <div class="stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">
-        ${h.statCard("Реализовано · закрытые", closed.length === 0 ? `<span style="color:#71717a">нет сделок</span>` : h.hruAmount(realized, true, cls(realized)), cls(realized), `${closed.length} закрытых · ${Fmt.fmtUsdSigned(realized)}`)}
-        ${h.statCard("В рынке · открытые", open.length === 0 ? `<span style="color:#71717a">нет позиций</span>` : h.hruAmount(floating, true, cls(floating)), cls(floating), `${open.length} открытых · ${Fmt.fmtUsdSigned(floating)}`)}
-        ${h.statCard("Итого по счёту", h.hruAmount(total, true, cls(total)), cls(total), `реализовано + в рынке · ${Fmt.fmtUsdSigned(total)}`)}
+        ${h.statCard("Реализовано · закрытые", closed.length === 0 ? `<span style="color:#71717a">нет сделок</span>` : amt(realized, true, cls(realized)), cls(realized), `${closed.length} закрытых · ${Fmt.fmtUsdSigned(realized)}`)}
+        ${h.statCard("В рынке · открытые", open.length === 0 ? `<span style="color:#71717a">нет позиций</span>` : amt(floating, true, cls(floating)), cls(floating), `${open.length} открытых · ${Fmt.fmtUsdSigned(floating)}`)}
+        ${h.statCard("Итого по счёту", amt(total, true, cls(total)), cls(total), `реализовано + в рынке · ${Fmt.fmtUsdSigned(total)}`)}
       </div>
       <p style="margin-top:10px;font-size:12px;line-height:1.6;color:#71717a">
-        Из них ИИ-сделки: реализовано ${dual(aiReal)} · в рынке ${dual(aiFloat)}. Цифры — не прикидка: каждый плюс/минус
-        посчитан движком по живым ценам биржи на момент показа, а доллары равны хрювнам один к одному.
+        Из них ИИ-сделки: реализовано ${dual(aiReal)} · в рынке ${dual(aiFloat)}. ${live
+          ? "На реальном рынке суммы — в USDT: каждый вход купил токен на OKX, каждое закрытие продало его, а итог считается по реальным ценам биржи."
+          : "Цифры — не прикидка: каждый плюс/минус посчитан движком по живым ценам биржи на момент показа, а доллары равны хрювнам один к одному."}
       </p>
     </section>`;
   }
@@ -257,7 +260,8 @@ const Views = (() => {
     const IDEAS_TTL = 45 * 60000;
     const SIGS_TTL = 2 * 3600000;
     const ideasAll = s.aiIdeas || [];
-    const ideas = ideasAll.filter((i) => nowTs - (i.ts || 0) <= IDEAS_TTL);
+    // R53: шорт-идеи не показываются нигде — демо повторяет реальный рынок 1:1 (спот OKX)
+    const ideas = ideasAll.filter((i) => nowTs - (i.ts || 0) <= IDEAS_TTL && i.res.verdict !== "шорт");
     const staleIdeas = ideasAll.length - ideas.length;
     const sigsAll = s.signals || [];
     const sigsFresh = sigsAll.filter((x) => nowTs - (x.ts || 0) <= SIGS_TTL);
@@ -281,11 +285,13 @@ const Views = (() => {
               </div>
               <div class="sig-note num">стоп ${fmtPrice(i.res.stop)} · цель ${fmtPrice(i.res.target)} · ${h.esc(i.res.note)}</div>
               ${(() => {
-                const sz = Math.min(1000, Math.max(200, Math.round(s.balance * 0.1)), Math.round(s.balance));
+                // R52: база размера — баланс текущего режима (live — реальные USDT с OKX)
+                const base = s.mode === "live" ? ((s.okx && Number.isFinite(s.okx.balanceUSDT)) ? s.okx.balanceUSDT : 0) : s.balance;
+                const sz = Math.min(1000, Math.max(200, Math.round(base * 0.1)), Math.round(base));
                 if (sz < 200) return "";
                 const atT = Engine.positionPnl({ side: i.res.verdict, entry: price, size: sz, lev: 1 }, i.res.target).pnl;
                 const atS = Engine.positionPnl({ side: i.res.verdict, entry: price, size: sz, lev: 1 }, i.res.stop).pnl;
-                return `<div class="sig-note num" style="margin-top:3px">сделка ${Fmt.fmtNum(sz)} ХРЮ ≈ ${Fmt.fmtUsd(sz)} → до цели ${dual(atT)} · до стопа ${dual(atS)}</div>`;
+                return `<div class="sig-note num" style="margin-top:3px">сделка ${Fmt.fmtNum(sz)} ${s.mode === "live" ? "USDT" : "ХРЮ ≈ " + Fmt.fmtUsd(sz)} → до цели ${dual(atT)} · до стопа ${dual(atS)}</div>`;
               })()}
             </div>
             <div class="row-right">
@@ -294,7 +300,7 @@ const Views = (() => {
             </div>
             <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
               <button class="link-btn" data-action="sig:forecast" data-arg="idea|${i.sym}" title="Прогноз ИИ: логика, факторы, время до цели">${h.icon("cpu", 12)} прогноз и логика</button>
-              <button class="btn-take" data-action="ai:open-idea" data-arg="${i.sym}">Открыть в демо</button>
+              <button class="btn-take" data-action="ai:open-idea" data-arg="${i.sym}">${s.mode === "live" ? "Купить на OKX · лонг" : "Открыть в демо"}</button>
             </div>
           </div>`;
         }).join("") + `</div>`;
@@ -320,7 +326,7 @@ const Views = (() => {
               ${(() => {
                 const atT = Engine.positionPnl({ side: "лонг", entry: price, size: 500, lev: 1 }, sig.target).pnl;
                 const atS = Engine.positionPnl({ side: "лонг", entry: price, size: 500, lev: 1 }, sig.stop).pnl;
-                return `<div class="sig-note num" style="margin-top:3px">сделка 500 ХРЮ ≈ $500 → до цели ${dual(atT)} · до стопа ${dual(atS)}</div>`;
+                return `<div class="sig-note num" style="margin-top:3px">${s.mode === "live" ? "сделка 500 USDT на OKX → до цели" : "сделка 500 ХРЮ ≈ $500 → до цели"} ${dual(atT)} · до стопа ${dual(atS)}</div>`;
               })()}
             </div>
             <div class="sig-levels num">
@@ -334,7 +340,7 @@ const Views = (() => {
             <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
               ${h.tag(sig.confidence >= 75 ? "green" : "gray", `уверенность ${sig.confidence}%`)}
               <button class="link-btn" data-action="sig:forecast" data-arg="sig|${sig.strategy}|${sig.sym}" title="Прогноз ИИ: логика, факторы, время до цели">${h.icon("cpu", 12)} прогноз и логика</button>
-              <button class="btn-take" data-action="sig:take" data-arg="${sig.sym}">Взять в демо · ${h.hruAmount(500)}</button>
+              <button class="btn-take" data-action="sig:take" data-arg="${sig.sym}">${s.mode === "live" ? "Взять · 500 USDT" : `Взять в демо · ${h.hruAmount(500)}`}</button>
             </div>
           </div>`;
         }).join("") + `</div></section>`;
@@ -380,7 +386,8 @@ const Views = (() => {
         <p style="font-size:12.5px;line-height:1.7;color:#71717a">
           Все данные — спотовый рынок: платформа каждые ~2 секунды подтягивает свежие 15-минутные свечи по всем ${DataLib.WATCHLIST.length} инструментам
           (включая GRAM — оригинальный Toncoin из сети The Open Network) и пересчитывает индикаторы: BB(20,2), облако Ишимоку, MACD(12,26,9), RSI(14), ATR(14) и объёмные аномалии.
-          Никаких фьючерсов и плеча: «лонг» означает тренд вверх (монета в портфеле), «шорт» — тренд вниз (выход в кэш).
+          Никаких фьючерсов и плеча: и демо, и реальный рынок торгуют как спот — только лонги
+          («монета в портфеле»); шорт-сделок больше нет нигде, медвежий вердикт ИИ означает выход в кэш.
           Стоп и цель считаются от ATR: риск 1.2×ATR, цель — 2R. Сигнал можно взять в демо — сделка исполнится по
           реальной рыночной цене, а результат придёт в хрювнах и долларах (курс 1:1 — плюс/минус одинаков в обеих валютах).
           Мозг ИИ общий для всех пользователей и режимов: сигналы и анализ идут одним глобальным ИИ, который уже учтён
@@ -735,8 +742,8 @@ const Views = (() => {
 
         <div class="notify-actions">
           ${kind === "sig"
-            ? `<button class="ai-open" data-action="sig:take" data-arg="${sym}">Взять в демо · ${h.hruAmount(500)}</button>`
-            : `<button class="ai-open" data-action="ai:open-idea" data-arg="${sym}">Открыть в демо по этой идее</button>`}
+            ? `<button class="ai-open" data-action="sig:take" data-arg="${sym}">${s.mode === "live" ? "Взять · 500 USDT" : `Взять в демо · ${h.hruAmount(500)}`}</button>`
+            : `<button class="ai-open" data-action="ai:open-idea" data-arg="${sym}">${s.mode === "live" ? "Взять сигнал · купить на OKX" : "Открыть в демо по этой идее"}</button>`}
           <button class="btn-ghost" data-action="modal:close">Закрыть</button>
         </div>
       </div>

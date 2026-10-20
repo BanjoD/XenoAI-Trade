@@ -430,7 +430,7 @@ section("Исходники: контроль ключевых констант"
   ok(notifySrc.indexOf("ntfy") === -1, "ntfy полностью убран из notify.js");
   ok(/tryEnsure\(3\)/.test(notifySrc), "авто-подписка при уже выданном разрешении (3 попытки + самозалечивание)");
   ok(/pushHealthLoop/.test(notifySrc), "R32: цикл здоровья пуши — умершая подписка восстанавливается сама");
-  ok(/Server\.pushSub\(\{ endpoint: raw\.endpoint, keys: raw\.keys \}\)/.test(notifySrc), "R32: живая подписка перерегистрируется на сервере");
+  ok(/Server\.pushSub\(\{ endpoint: raw\.endpoint, keys: raw\.keys, origin/.test(notifySrc), "R32/R47: живая подписка перерегистрируется на сервере (с origin)");
 
   const guardSrc = fs.readFileSync(path.join(REPO, "tools", "guardian.js"), "utf8");
   ok(/require\("\.\/webpush\.js"\)/.test(guardSrc), "Страж шлёт пуши через tools/webpush.js (нативный Web Push)");
@@ -441,14 +441,14 @@ section("Исходники: контроль ключевых констант"
 
   const viewsSrc = fs.readFileSync(path.join(REPO, "js", "views-trade.js"), "utf8");
   ok(/ai:fail-apply/.test(viewsSrc) && /ai-fail-input/.test(viewsSrc), "UI провального порога на месте");
-  ok(viewsSrc.indexOf("ntfy") === -1 && /notify:push-enable/.test(viewsSrc), "Кабинет: ntfy заменён на подписку Web Push");
+  ok(/notify:push-enable/.test(viewsSrc) && /notify:ntfy-on/.test(viewsSrc), "Кабинет: Web Push основной + резервный канал ntfy (R50)");
   ok(/торговля стоит · цены заморожены/.test(viewsSrc), "честная плашка деградации в сделках");
 
   const swSrc = fs.readFileSync(path.join(REPO, "sw.js"), "utf8");
-  ok(/VERSION = "xenoai-v20"/.test(swSrc), "SW поднят до v20");
+  ok(/VERSION = "xenoai-v25"/.test(swSrc), "SW поднят до v25 (R50)");
   ok(/SKIP_WAITING/.test(swSrc), "R32: SKIP_WAITING — новая версия SW применяется сразу");
   const idx = fs.readFileSync(path.join(REPO, "index.html"), "utf8");
-  ok(idx.indexOf("v=20261041") !== -1, "кэш-версии ?v=20261041");
+  ok(idx.indexOf("v=20261046") !== -1 && idx.indexOf("v=20261041") === -1, "кэш-версии ?v=20261046 (R50)");
   ok(idx.indexOf("js/backend.js") !== -1 && idx.indexOf("js/backend-config.js") !== -1, "R32: серверный клиент подключён в index.html");
   const yml = fs.readFileSync(path.join(REPO, ".github", "workflows", "guardian.yml"), "utf8");
   ok(yml.indexOf("npm install") === -1, "Стражу не нужны npm-зависимости (чистый Node crypto)");

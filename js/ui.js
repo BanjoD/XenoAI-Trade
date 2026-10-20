@@ -126,6 +126,12 @@ const UI = (() => {
     return `<span style="display:inline-flex;align-items:center;gap:4px" class="${cls || "num"}">${sign ? `<span>${sign}</span>` : ""}<span class="num">${Fmt.fmtHru(v)}</span>${hru(12)}<span style="font-size:.85em;font-weight:500;opacity:.8">ХРЮ</span></span>`;
   }
 
+  // R52: сумма в USDT (реальный рынок — без хрювенного значка)
+  function usdAmount(v, signed, cls) {
+    const sign = signed ? (v > 0 ? "+" : v < 0 ? "−" : "") : "";
+    return `<span style="display:inline-flex;align-items:center;gap:3px" class="${cls || "num"}">${sign ? `<span>${sign}</span>` : ""}<span class="num">${Fmt.fmtHru(v)}</span><span style="font-size:.85em;font-weight:500;opacity:.8">USDT</span></span>`;
+  }
+
   function pctText(v, cls) {
     const s = v > 0 ? "+" : v < 0 ? "−" : "";
     return `<span class="num ${v >= 0 ? "text-green" : "text-red"} ${cls || ""}">${s}${Math.abs(v).toFixed(2)}%</span>`;
@@ -189,7 +195,7 @@ const UI = (() => {
   }
 
   return {
-    esc, icon, hru, xenoMark, xenoLogo, coin, tag, sideTag, hruAmount, pctText,
+    esc, icon, hru, xenoMark, xenoLogo, coin, tag, sideTag, hruAmount, usdAmount, pctText,
     statCard, sectionTitle, onlineDot, tfBar, togglePill, toast, showModal, closeModal,
   };
 })();

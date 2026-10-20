@@ -46,6 +46,9 @@ const Store = (() => {
     // R43 «Теневая торговля»: журнал отказов ИИ и их проверка временем (по мотивам поста Sova)
     shadow: { list: [], stats: { right: 0, wrong: 0, flat: 0, avoidedSum: 0, avoidedN: 0, since: 0 } },
     liveOrders: [],     // отправленные реальные ордера (заготовка реальной торговли)
+    liveStats: { n: 0, wins: 0, losses: 0, pnlUsdt: 0, since: 0 }, // R49: итог обучения ИИ на реальных сделках (считает сервер)
+    glmSrv: null,       // R49: вердикт GLM-аналитика СЕРВЕРА (13-й фактор 24/7; без ключа — только вердикт)
+    okx: { on: false, auto: false, mask: "", balanceUSDT: null, balanceEq: null, ts: 0, lastSync: 0, lastErr: "" }, // R51: полная синхронизация OKX (публичное состояние; ключи живут на сервере)
     aiBrain: null,      // память ИИ: адаптивные веса, статистика монет, уроки (обучение на сделках)
     aiSession: null,    // сессия автопилота: { startEquity, openedAt } — база для авто-стопа ±лимит
     aiStop: null,       // причина авто-стопа сессии: { reason: profit|loss, pct, ts, threshold, closed }
@@ -68,6 +71,7 @@ const Store = (() => {
     clearedU: [],       // «могилки» очищенной истории пользователя (id удалённых закрытых сделок) — чтобы облако не воскресило их
     clearedL: [],       // «могилки» очищенной истории лаборатории
     pushSubs: [],       // R30: push-подписки устройств (Web Push) — Страж шлёт по ним пуши о сделках
+    ntfy: { on: false, topic: "", last: null }, // R50: резервный канал ntfy (не зависит от Chrome/SW)
     sync: { code: null, enabled: false, lastPush: 0, lastPull: 0, lastError: null, lastSeenRev: 0, sawRemote: false }, // синхронизация устройств
     host: null,         // R31 «серверный аккаунт»: кто сейчас исполнитель автоторговли { id, tag, until } (аренда уезжает в облако)
   };
@@ -78,9 +82,10 @@ const Store = (() => {
       v: 1,
       weights: null,       // null → базовые Engine.AI_BASE_WEIGHTS; далее — адаптивные
       rel: {},             // надёжность фактора (множитель веса) 0.55..1.5, старт 1
-      symStats: {},        // sym → { n, wins, streak, avgPct } — опыт по монетам
+      symStats: {},        // sym → { n, wins, streak, avgPct, long:{…}, short:{…} } — опыт по монетам (R52: + направления)
       confThreshold: 74,   // динамический порог входа автопилота (калибруется результатами; база 74 — запрос пользователя: всё выше 74% открывается само)
       trades: 0, wins: 0, losses: 0,
+      longTrades: 0, longWins: 0, // R52: лонг-опыт отдельно (валюта решений реального рынка)
       lessons: [],         // что ИИ вынес из сделок (лента выводов)
       wFlags: {},          // защита уроков от повторов
       updatedAt: 0,
@@ -110,6 +115,10 @@ const Store = (() => {
     if (!Number.isFinite(br.wins) || br.wins < 0) br.wins = 0;
     if (!Number.isFinite(br.losses) || br.losses < 0) br.losses = 0;
     if (!Number.isFinite(br.confThreshold)) br.confThreshold = 74;
+    // R52: лонг-счётчики (опыт именно по лонгам — применяются на реальном рынке)
+    if (!Number.isFinite(br.longTrades) || br.longTrades < 0) { br.longTrades = 0; br.longWins = 0; }
+    if (!Number.isFinite(br.longWins) || br.longWins < 0) br.longWins = 0;
+    if (br.longWins > br.longTrades) br.longWins = br.longTrades;
     // R29: диапазон 70..80 (было 70..84). Потолок 80: истории серии минусов (кейс R29:
     // 12 стопов за вечер) калибровка задирала порог до 84 — уверенность ансамбля выше
     // 84 почти недостижима, и автопилот замерал («открывает очень редко»). 80 остаётся
@@ -140,7 +149,15 @@ const Store = (() => {
     for (const sym in other.symStats || {}) {
       const o = other.symStats[sym], m = main.symStats[sym];
       if (o && (!m || o.n > m.n)) main.symStats[sym] = o;
+      // R52: под-статистики по направлениям подтягиваем недостающим (max по n)
+      else if (o && m) {
+        for (const sk of ["long", "short"]) {
+          const os = o[sk], ms = m[sk];
+          if (os && (!ms || os.n > ms.n)) m[sk] = os;
+        }
+      }
     }
+    if ((other.longTrades || 0) > (main.longTrades || 0)) { main.longTrades = other.longTrades; main.longWins = other.longWins; } // R52
     const seen = new Set((main.lessons || []).map((l) => l.text));
     (other.lessons || []).forEach((l) => { if (l && l.text && !seen.has(l.text)) main.lessons.push(l); });
     main.lessons = main.lessons.sort((x, y) => (y.ts || 0) - (x.ts || 0)).slice(0, 24);
@@ -346,6 +363,9 @@ const Store = (() => {
       labAccounts: s.labAccounts, labPositions: s.labPositions, labClosed: s.labClosed.slice(0, 400),
       events: s.events.slice(0, 80), autoTrade: s.autoTrade, labAutoMigrated: true, equityHist: s.equityHist.slice(-300),
       mode: s.mode, aiAuto: s.aiAuto, aiAutoLive: s.aiAutoLive, liveOrders: s.liveOrders.slice(0, 50),
+      liveStats: s.liveStats && typeof s.liveStats === "object" ? { ...s.liveStats } : { n: 0, wins: 0, losses: 0, pnlUsdt: 0, since: 0 }, // R49
+      glmVerdict: s.glmSrv && typeof s.glmSrv === "object" ? { ...s.glmSrv } : null, // R49: вердикт (без ключа)
+      okx: s.okx && typeof s.okx === "object" ? { on: !!s.okx.on, auto: s.okx.auto !== false, mask: String(s.okx.mask || ""), balanceUSDT: s.okx.balanceUSDT, balanceEq: s.okx.balanceEq, ts: s.okx.ts || 0, lastSync: s.okx.lastSync || 0, lastErr: String(s.okx.lastErr || "").slice(0, 160) } : null, // R51: публичное состояние (секретов нет — они только на сервере)
       aiSession: s.aiSession, aiStop: s.aiStop, aiThreshold: s.aiThreshold, aiMaxPos: s.aiMaxPos,
       failPct: s.failPct, // провальный порог едет в облако: Страж закрывает по тем же правилам
       maxDeal: s.maxDeal, maxTotal: s.maxTotal, aiPosMode: s.aiPosMode,
@@ -356,6 +376,8 @@ const Store = (() => {
       clearedU: (s.clearedU || []).slice(-800), clearedL: (s.clearedL || []).slice(-800),
       // R30: push-подписки устройств (Web Push) — по ним Страж шлёт пуши о сделках
       pushSubs: (s.pushSubs || []).slice(0, 8),
+      // R50: резервный канал ntfy — конфиг едет с архивом (сервер авторитарен)
+      ntfy: s.ntfy && typeof s.ntfy === "object" ? { on: !!s.ntfy.on, topic: String(s.ntfy.topic || ""), last: s.ntfy.last || null } : { on: false, topic: "", last: null },
       // R31: аренда исполнителя автоторговли — часть серверного состояния аккаунта
       host: s.host && s.host.id ? { id: s.host.id, tag: s.host.tag || "", until: s.host.until || 0 } : null,
       // идеи сканера сохраняются: после перезапуска вкладки «Сигналы» сразу полные,
@@ -420,6 +442,36 @@ const Store = (() => {
     if (typeof d.aiAuto === "boolean") state.aiAuto = d.aiAuto;
     if (typeof d.aiAutoLive === "boolean") state.aiAutoLive = d.aiAutoLive;
     if (Array.isArray(d.liveOrders)) state.liveOrders = d.liveOrders;
+    // R49: реальные сделки (статистика обучения) и вердикт GLM-аналитика сервера
+    if (d.liveStats && typeof d.liveStats === "object") {
+      const ls = state.liveStats = state.liveStats || { n: 0, wins: 0, losses: 0, pnlUsdt: 0, since: 0 };
+      for (const k of ["n", "wins", "losses", "pnlUsdt"]) { const v = Number(d.liveStats[k]); if (Number.isFinite(v) && v >= 0) ls[k] = v; }
+      if (Number(d.liveStats.since) > 0) ls.since = Number(d.liveStats.since);
+    }
+    if (d.glmVerdict && typeof d.glmVerdict === "object") {
+      const v = d.glmVerdict;
+      state.glmSrv = {
+        bias: v.bias === "лонг" || v.bias === "шорт" || v.bias === "flat" ? v.bias : "flat",
+        confidence: Math.max(0, Math.min(100, Math.round(Number(v.confidence) || 0))),
+        reasoning: String(v.reasoning || "").slice(0, 240),
+        ts: Number(v.ts) || 0, model: String(v.model || "").slice(0, 40),
+        status: v.status === "ok" || v.status === "error" ? v.status : "error",
+        error: String(v.error || "").slice(0, 160),
+      };
+    }
+    // R51: публичное состояние синхронизации OKX (маска/баланс; ключи остаются на сервере)
+    if (d.okx && typeof d.okx === "object") {
+      state.okx = {
+        on: d.okx.on === true,
+        auto: d.okx.auto !== false,
+        mask: String(d.okx.mask || "").slice(0, 16),
+        balanceUSDT: Number.isFinite(Number(d.okx.balanceUSDT)) ? Number(d.okx.balanceUSDT) : null,
+        balanceEq: Number.isFinite(Number(d.okx.balanceEq)) ? Number(d.okx.balanceEq) : null,
+        ts: Number(d.okx.ts) || 0,
+        lastSync: Number(d.okx.lastSync) || 0,
+        lastErr: String(d.okx.lastErr || "").slice(0, 160),
+      };
+    }
     if (d.aiSession && typeof d.aiSession.startEquity === "number") state.aiSession = d.aiSession;
     if (d.aiStop && (d.aiStop.reason === "profit" || d.aiStop.reason === "loss")) state.aiStop = d.aiStop;
     if (typeof d.aiThreshold === "number" && d.aiThreshold >= 5 && d.aiThreshold <= 500) state.aiThreshold = d.aiThreshold;
@@ -450,6 +502,14 @@ const Store = (() => {
       state.pushSubs = d.pushSubs
         .filter((s) => s && typeof s.endpoint === "string" && s.endpoint.indexOf("https://") === 0 && s.keys && s.keys.p256dh && s.keys.auth)
         .slice(0, 8);
+    }
+    // R50: резервный канал ntfy — валидация структуры (тема 6–64, латиница/цифры/-/_)
+    if (d.ntfy && typeof d.ntfy === "object") {
+      state.ntfy = {
+        on: d.ntfy.on === true && /^[a-zA-Z0-9_-]{6,64}$/.test(String(d.ntfy.topic || "")),
+        topic: /^[a-zA-Z0-9_-]{6,64}$/.test(String(d.ntfy.topic || "")) ? String(d.ntfy.topic) : "",
+        last: d.ntfy.last && typeof d.ntfy.last === "object" ? { ts: Number(d.ntfy.last.ts) || 0, status: Number(d.ntfy.last.status) || 0, ok: Boolean(d.ntfy.last.ok) } : null,
+      };
     }
     // R31: аренда исполнителя автоторговли (кто сейчас ведёт входы/флипы — видно в Кабинете)
     if (d.host === null) state.host = null;
@@ -546,6 +606,8 @@ const Store = (() => {
     state.userPositions = []; state.userClosed = []; state.equityHist = [];
     state._ai = null;
     state.aiIdeas = []; state.liveOrders = [];
+    state.liveStats = { n: 0, wins: 0, losses: 0, pnlUsdt: 0, since: 0 }; state.glmSrv = null; // R49
+    state.okx = { on: false, auto: false, mask: "", balanceUSDT: null, balanceEq: null, ts: 0, lastSync: 0, lastErr: "" }; // R51
     state.aiBrain = defaultBrain(); state.aiSession = null; state.aiStop = null;
     state.aiThreshold = 50; // дефолт до загрузки персист-данных пользователя
     state.failPct = 50;
@@ -730,6 +792,30 @@ const Store = (() => {
 
     // push-подписки всех устройств
     out.pushSubs = mergePushSubs(a.pushSubs, b.pushSubs);
+    // R50: резервный канал ntfy — целиком от более свежего источника (last.ts),
+    // при равенстве — включённый важнее выключенного
+    out.ntfy = (() => {
+      const na = a.ntfy && typeof a.ntfy === "object" ? a.ntfy : null;
+      const nb = b.ntfy && typeof b.ntfy === "object" ? b.ntfy : null;
+      if (!na) return nb || { on: false, topic: "", last: null };
+      if (!nb) return na;
+      const ta = (na.last && na.last.ts) || 0, tb = (nb.last && nb.last.ts) || 0;
+      if (ta !== tb) return ta > tb ? na : nb;
+      if (!!na.on !== !!nb.on) return na.on ? na : nb;
+      return String(na.topic || "") ? na : nb;
+    })();
+
+    // R51: синхронизация OKX — сервер авторитарен; при слиянии берём того, у кого свежее
+    // состояние баланса (lastSync), при равенстве — подключённого
+    out.okx = (() => {
+      const oa = a.okx && typeof a.okx === "object" ? a.okx : null;
+      const ob = b.okx && typeof b.okx === "object" ? b.okx : null;
+      if (!oa) return ob || null;
+      if (!ob) return oa;
+      const la = Number(oa.lastSync) || 0, lb = Number(ob.lastSync) || 0;
+      if (la !== lb) return la > lb ? oa : ob;
+      return oa.on ? oa : ob;
+    })();
 
     // R43: теневая торговля — union записей по id, счётчики по максимуму (они монотонные)
     {
@@ -1065,8 +1151,10 @@ const Store = (() => {
       a.maxDeal, a.maxTotal, a.aiThreshold, a.aiPosMode,
       a.failPct, // R30: провальный порог — Страж должен получить его как можно раньше
       (a.pushSubs || []).length, // новая подписка устройства обязана уехать в облако
+      a.ntfy ? (a.ntfy.on ? 1 : 0) + ":" + (a.ntfy.topic || "") + ":" + ((a.ntfy.last && a.ntfy.last.ts) || 0) : "-", // R50: резервный канал обязан уезжать
       a.host ? a.host.id + ":" + a.host.until : "-", // R31: аренда исполнителя обязана уезжать (заявка/продление/освобождение)
       a.mode, a.autoTrade ? 1 : 0, a.aiAuto ? 1 : 0, a.aiAutoLive ? 1 : 0,
+      a.okx ? (a.okx.on ? 1 : 0) + (a.okx.auto !== false ? 1 : 0) + ":" + (a.okx.mask || "") + ":" + ((Number(a.okx.lastSync) || 0) / 60000 | 0) : "okx-", // R51: состояние OKX обязано уезжать
     ].join("|");
   }
 
@@ -1227,6 +1315,45 @@ const Store = (() => {
     const before = (state.pushSubs || []).length;
     state.pushSubs = (state.pushSubs || []).filter((s) => s.endpoint !== endpoint);
     if (state.pushSubs.length !== before) persist();
+  }
+
+  // ---------- R50: РЕЗЕРВНЫЙ КАНАЛ NTFY ----------
+  // Web Push — основной канал, но живая диагностика (r50) показала: на части
+  // Android-устройств Chrome не будит service worker в фоне (OEM-менеджеры батареи).
+  // ntfy — независимое приложение, получает события своим соединением и показывает
+  // их при полностью закрытом браузере. Тема — несгадываемый случайный идентификатор.
+  function generateNtfyTopic() {
+    // без «0/o/1/l» — тема произносится и перепечатывается руками
+    const abc = "abcdefghjkmnpqrstuvwxyz23456789";
+    let s = "";
+    try {
+      const rnd = new Uint8Array(10);
+      (window.crypto || crypto).getRandomValues(rnd);
+      for (const b of rnd) s += abc[b % abc.length];
+    } catch (e) {
+      for (let i = 0; i < 10; i++) s += abc[Math.floor(Math.random() * abc.length)];
+    }
+    return "xenoai-" + s;
+  }
+  function setNtfy(on, topic) {
+    const t = String(topic || (state.ntfy && state.ntfy.topic) || "").trim();
+    if (!/^[a-zA-Z0-9_-]{6,64}$/.test(t)) return { ok: false, error: "Тема ntfy: 6–64 символа, латиница/цифры/дефис/подчёркивание" };
+    const localRes = (() => {
+      state.ntfy = { on: on !== false, topic: t, last: (state.ntfy && state.ntfy.last) || null };
+      persist(); emit();
+      return { ok: true };
+    })();
+    if (serverMode()) serverAction("ntfySet", { on: on !== false, topic: t });
+    return localRes;
+  }
+
+  // R51: аварийный выключатель авто-ордеров OKX (баланс продолжает синхронизироваться)
+  function setOkxAuto(on) {
+    state.okx = state.okx && typeof state.okx === "object" ? state.okx : { on: false, auto: false, mask: "", balanceUSDT: null, balanceEq: null, ts: 0, lastSync: 0, lastErr: "" };
+    state.okx.auto = on !== false;
+    persist(); emit();
+    if (serverMode()) serverAction("okxAuto", { on: on !== false });
+    return { ok: true };
   }
 
   // шина системных уведомлений: модуль Notify подписывается и показывает
@@ -1467,6 +1594,40 @@ const Store = (() => {
     const price = p0.price;
     const margin = Math.round(Number(p.size) || 0);
     if (!(margin > 0)) return { ok: false, error: "Некорректный размер сделки" };
+    // ============ R53: ШОРТОВ НЕТ НИГДЕ — ДЕМО ПОВТОРЯЕТ РЕАЛЬНЫЙ РЫНОК 1:1 (зеркало сервера) ============
+    // ИИ учится только на кейсах, осуществимых на споте OKX; старые открытые шорты
+    // обслуживаются движком до закрытия
+    if (p.side !== "лонг") return { ok: false, error: "Шортов больше нет — демо-торговля повторяет реальный рынок 1:1: спот OKX умеет только купить токен за USDT и продать его обратно. Дождитесь лонг-сигнала." };
+    // ============ R52: РЕАЛЬНЫЙ РЫНОК — ТОЛЬКО ЛОНГИ В USDT ============
+    if (state.mode === "live") {
+      if (p.side !== "лонг") return { ok: false, error: "На реальном рынке шортов нет: спот OKX умеет только купить токен за USDT и продать его обратно" };
+      if (!(state.okx && state.okx.on && state.okx.auto !== false)) return { ok: false, error: "Реальные сделки исполняются только при подключённом OKX и включённых авто-ордерах" };
+      const avail = state.okx && Number.isFinite(state.okx.balanceUSDT) ? state.okx.balanceUSDT : null;
+      if (avail == null) return { ok: false, error: "Баланс OKX ещё не синхронизирован — подождите минуту" };
+      if (margin > avail) return { ok: false, error: `Недостаточно свободных USDT на бирже: доступно ${Fmt.fmtNum(avail, 2)} USDT` };
+      const risk = price * 0.02;
+      const posLive = {
+        id: p.id || `u${Date.now()}`, owner: "user", strategy: p.strategy || "manual", sym: p.sym, side: "лонг",
+        size: margin, lev: 1, entry: price,
+        stop: p.stop || (price - risk),
+        target: p.target || (price + risk * 2),
+        r0: Math.abs(price - (p.stop || (price - risk))),
+        openedAt: Date.now(),
+        ai: p.ai || null,
+        usdt: true, // R52: позиция реального рынка — в USDT
+      };
+      // баланс ХРЮ НЕ трогаем: на реальном рынке деньги — реальные USDT на бирже
+      state.userPositions = [posLive, ...state.userPositions];
+      pushEvent({
+        tone: "bull",
+        title: p.strategy === "ai" ? `ИИ открыл реальную сделку: ${p.sym} лонг${p.ai ? ` · уверенность ${p.ai.confidence}%` : ""}` : `Реальная сделка открыта: ${p.sym} лонг`,
+        detail: `${Fmt.fmtNum(margin)} USDT · покупка ${p.sym} на OKX-споте идёт автоматически · цена ≈ ${Fmt.fmtPrice(price)}`,
+        sym: p.sym,
+        notify: (p.strategy === "ai" && p.ai && p.ai.auto) ? null : { kind: p.strategy === "ai" ? "ai_open" : "user_open" },
+      });
+      persist(); emit();
+      return { ok: true, pos: posLive };
+    }
     // ЛИМИТ 1: максимальная сумма одной сделки
     const dealCap = aiDealCap();
     if (margin > dealCap) return { ok: false, error: `Лимит одной сделки — ${Fmt.fmtNum(dealCap)} ХРЮ (≈ $${Fmt.fmtNum(dealCap)}). Уменьшите размер или поднимите лимит в настройках ИИ` };
@@ -1477,11 +1638,11 @@ const Store = (() => {
     if (margin > state.balance) return { ok: false, error: `Недостаточно хрювен: свободно ${Fmt.fmtNum(state.balance)} ХРЮ` };
     const risk = price * 0.02; // стоп −2% по умолчанию (ИИ передаёт свои уровни)
     const pos = {
-      id: `u${Date.now()}`, owner: "user", strategy: p.strategy || "manual", sym: p.sym, side: p.side,
-      size: margin, lev: p.lev || 1, entry: price,
-      stop: p.stop || (p.side === "лонг" ? price - risk : price + risk),
-      target: p.target || (p.side === "лонг" ? price + risk * 2 : price - risk * 2),
-      r0: Math.abs(price - (p.stop || (p.side === "лонг" ? price - risk : price + risk))), // исходный риск на единицу цены — база трейлинга
+      id: `u${Date.now()}`, owner: "user", strategy: p.strategy || "manual", sym: p.sym, side: "лонг",
+      size: margin, lev: 1, entry: price,
+      stop: p.stop || (price - risk),
+      target: p.target || (price + risk * 2),
+      r0: Math.abs(price - (p.stop || (price - risk))), // исходный риск на единицу цены — база трейлинга
       openedAt: Date.now(),
       ai: p.ai || null,
     };
@@ -1489,8 +1650,8 @@ const Store = (() => {
     state.balance -= margin;
     state.userPositions = [pos, ...state.userPositions];
     pushEvent({
-      tone: p.side === "лонг" ? "bull" : "bear",
-      title: p.strategy === "ai" ? `ИИ-сделка открыта: ${p.sym} ${p.side} ×${pos.lev}` : `Демо-сделка открыта: ${p.sym} ${p.side} ×${pos.lev}`,
+      tone: "bull",
+      title: p.strategy === "ai" ? `ИИ-сделка открыта: ${p.sym} лонг ×${pos.lev}` : `Демо-сделка открыта: ${p.sym} лонг ×${pos.lev}`,
       detail: `${Fmt.fmtNum(margin)} ХРЮ (≈ ${Fmt.fmtUsd(margin)}) по реальной цене ${price.toPrecision(6)}${p.ai ? ` · уверенность ИИ ${p.ai.confidence}%` : ""}`,
       sym: p.sym,
       // авто-вход оповещается отдельным событием «ИИ-автопилот вошёл» (см. aiOpenInternal)
@@ -1517,12 +1678,14 @@ const Store = (() => {
     const closed = Engine.closeTrade(pos, price, "Вручную");
     state.userPositions = state.userPositions.filter((p) => p.id !== id);
     state.userClosed = [closed, ...state.userClosed].slice(0, 300);
-    state.balance += pos.size + closed.pnl; // возврат маржи + результат (уже после комиссии 0.1%)
+    if (state.mode !== "live") state.balance += pos.size + closed.pnl; // R52: live — USDT вернутся с биржи, ХРЮ не трогаем
     learnFromClosed(closed); // ИИ учится на результате
     pushEvent({
       tone: closed.pnl >= 0 ? "bull" : "bear",
-      title: `Демо-сделка закрыта: ${pos.sym} ${closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))} ХРЮ (≈ ${closed.pnl >= 0 ? "+" : "−"}$${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))})`,
-      detail: closed.exitReason,
+      title: state.mode === "live"
+        ? `Сделка закрыта: ${pos.sym} ${closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))} USDT`
+        : `Демо-сделка закрыта: ${pos.sym} ${closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))} ХРЮ (≈ ${closed.pnl >= 0 ? "+" : "−"}$${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))})`,
+      detail: state.mode === "live" ? `${closed.exitReason} · токен продаётся на OKX, USDT вернутся на баланс биржи` : closed.exitReason,
       sym: pos.sym,
       notify: { kind: "user_close", data: { pnl: closed.pnl } },
     });
@@ -1694,10 +1857,13 @@ const Store = (() => {
   function setAiMaxPos(v) { return setAiPosMode(v); } // совместимость со старыми вызовами
 
   // --- размер ИИ-сделки: четверть-Келли по обученному винрейту + все лимиты ---
-  function aiKellyFrac() {
+  // R52: longOnly (реальный рынок) — применяем ЛОНГ-опыт ИИ (longTrades/longWins)
+  function aiKellyFrac(longOnly) {
     const b = state.aiBrain || {};
     // сглаженный винрейт (Лаплас, априор 50%): пока сделок мало — размер консервативен
-    const p = ((b.wins || 0) + 3) / ((b.trades || 0) + 6);
+    const tr = longOnly ? (b.longTrades || 0) : (b.trades || 0);
+    const wn = longOnly ? (b.longWins || 0) : (b.wins || 0);
+    const p = (wn + 3) / (tr + 6);
     // Kelly для RR 1:2: f* = p − (1−p)/b, b=2 → f* = 1.5p − 0.5; берём четверть и кламп 2..10%
     const f = 1.5 * p - 0.5;
     return Math.max(0.02, Math.min(0.1, 0.25 * Math.max(0, f)));
@@ -1705,14 +1871,19 @@ const Store = (() => {
   function aiSizeCalc() {
     const cap = aiDealCap();
     const remain = aiTotalRemain();
-    let size = Math.round(state.balance * aiKellyFrac());
-    size = Math.min(size, cap, Math.round(remain), Math.round(state.balance));
+    // R52: в live считаем размер от СВОБОДНЫХ USDT биржи (серверная синхронизация)
+    // R53: келли от ЛОНГ-опыта во ВСЕХ режимах — демо повторяет реальный рынок 1:1
+    const live = state.mode === "live";
+    const okxBal = live && state.okx && Number.isFinite(state.okx.balanceUSDT) ? state.okx.balanceUSDT : null;
+    const bal = live ? (okxBal != null ? okxBal : 0) : state.balance;
+    let size = Math.round(bal * aiKellyFrac(true));
+    size = Math.min(size, cap, Math.round(remain), Math.round(bal));
     const floor = Math.min(AI_MIN_SIZE, cap);
     if (!Number.isFinite(size) || size < floor) {
-      if (state.balance >= floor && remain >= floor) size = floor;
-      else return { size: 0, why: "не хватает свободных хрювен или суммарного лимита" };
+      if (bal >= floor && remain >= floor) size = floor;
+      else return { size: 0, why: live ? "не хватает свободных USDT на OKX или суммарного лимита" : "не хватает свободных хрювен или суммарного лимита" };
     }
-    if (size <= 0) return { size: 0, why: "нулевой размер" };
+    if (size <= 0) return { size: 0, why: live && okxBal == null ? "баланс OKX ещё не синхронизирован" : "нулевой размер" };
     return { size, why: "ок" };
   }
   function setAiThreshold(v) {
@@ -1795,7 +1966,12 @@ const Store = (() => {
 
   // перегрев портфеля: больше 60% баланса в позициях — новых входов нет
   function heatGuard() {
-    const bal = state.balance;
+    // R52: в live база — реальные USDT (баланс биржи + вложенное в позиции)
+    let bal = state.balance;
+    if (state.mode === "live") {
+      bal = state.okx && Number.isFinite(state.okx.balanceUSDT) ? state.okx.balanceUSDT : 0;
+      for (const p of state.userPositions) if (p.live && p.live.qty) bal += p.size || 0;
+    }
     const inMarket = openPositionsSum();
     if (bal > 0 && inMarket / bal > 0.6) return { ok: false, why: `портфель перегрет: ${Math.round((inMarket / bal) * 100)}% баланса в позициях` };
     return { ok: true, why: "ок" };
@@ -1859,7 +2035,7 @@ const Store = (() => {
       const closed = Engine.closeTrade(pos, price, reason);
       state.userPositions = state.userPositions.filter((p) => p.id !== pos.id);
       state.userClosed = [closed, ...state.userClosed].slice(0, 300);
-      state.balance += closed.size + closed.pnl; // возврат маржи + результат
+      if (state.mode !== "live") state.balance += closed.size + closed.pnl; // R52: live — без ХРЮ
       learnFromClosed(closed); // ИИ учится и на принудительных закрытиях
       out.push(closed);
     }
@@ -1908,7 +2084,14 @@ const Store = (() => {
     const labTrade = Boolean(isLab || (c.ai && c.ai.lab));
     const hasFactors = Boolean(c.ai && Array.isArray(c.ai.factors) && c.ai.factors.length);
     const won = c.pnl >= 0;
-    if (isAi) { brain.trades++; if (won) brain.wins++; else brain.losses++; }
+    if (isAi) {
+      brain.trades++; if (won) brain.wins++; else brain.losses++;
+      // R52: ЛОНГ-ОПЫТ отдельно — валюта решений реального рынка (спот OKX, только лонги)
+      if (!labTrade && c.side === "лонг") {
+        brain.longTrades = (brain.longTrades || 0) + 1;
+        if (won) brain.longWins = (brain.longWins || 0) + 1;
+      }
+    }
 
     // 1) надёжность факторов — по сделкам со снапшотом факторов (ИИ-сделки и лаборатория).
     //    Лаборатория учит вдвое медленнее: её вход решает стратегия, а не ансамбль.
@@ -1958,11 +2141,19 @@ const Store = (() => {
 
     // 2) опыт по монете — на ВСЕХ сделках (ИИ, лаборатория, сигнал, ручная) всех
     //    пользователей: любая закрытая сделка что-то говорит о поведении монеты
+    //    R52: + под-статистики по направлениям (long/short) — лонг-опыт применяется
+    //    на реальном рынке в первую очередь
     const st = brain.symStats[c.sym] || { n: 0, wins: 0, streak: 0, avgPct: 0 };
     st.n++;
     if (won) { st.wins++; st.streak = st.streak < 0 ? 1 : st.streak + 1; }
     else { st.streak = st.streak > 0 ? -1 : st.streak - 1; }
     st.avgPct = (st.avgPct * (st.n - 1) + (c.pnlPct || 0)) / st.n;
+    const sk = c.side === "шорт" ? "short" : "long";
+    const d = st[sk] = st[sk] || { n: 0, wins: 0, streak: 0, avgPct: 0 };
+    d.n++;
+    if (won) { d.wins++; d.streak = d.streak < 0 ? 1 : d.streak + 1; }
+    else { d.streak = d.streak > 0 ? -1 : d.streak - 1; }
+    d.avgPct = (d.avgPct * (d.n - 1) + (c.pnlPct || 0)) / d.n;
     brain.symStats[c.sym] = st;
     const sFlag = c.sym + "-streak" + st.streak;
     if (st.streak <= -3 && st.n >= 4 && !brain.wFlags[sFlag]) {
@@ -2002,17 +2193,21 @@ const Store = (() => {
   }
 
   // сдвиг уверенности по опыту монеты: серия минусов — осторожнее, серия плюсов — чуть смелее
-  function symBias(sym) {
+  // R52: опыт по НАПРАВЛЕНИЯМ — на реальном рынке (только лонги) применяем лонг-стрик
+  function symBias(sym, side) {
     const st = state.aiBrain.symStats[sym];
     if (!st || st.n < 3) return 0;
-    if (st.streak >= 3) return 3;
-    if (st.streak <= -3) return -Math.min(10, 2 * Math.abs(st.streak));
+    const d = side === "лонг" ? st.long : side === "шорт" ? st.short : null;
+    const use = d && Number(d.n) >= 3 ? d : st;
+    if (use.streak >= 3) return 3;
+    if (use.streak <= -3) return -Math.min(10, 2 * Math.abs(use.streak));
     return 0;
   }
 
   function updateIdeas(sym, res, guard) {
+    // R53: шорт-идей не существует НИГДЕ (демо повторяет реальный рынок 1:1, спот OKX)
     const rest = state.aiIdeas.filter((i) => i.sym !== sym);
-    if (res.verdict !== "wait") rest.push({ sym, res, guard, ts: Date.now() });
+    if (res.verdict !== "wait" && res.verdict !== "шорт") rest.push({ sym, res, guard, ts: Date.now() });
     rest.sort((a, b) => b.res.confidence - a.res.confidence);
     state.aiIdeas = rest.slice(0, 8);
   }
@@ -2027,7 +2222,9 @@ const Store = (() => {
       pushEvent({
         tone: res.verdict === "лонг" ? "bull" : "bear",
         title: `ИИ-автопилот вошёл: ${res.sym} ${res.verdict} ${res.confidence}%`,
-        detail: `${Fmt.fmtNum(size)} ХРЮ (≈ ${Fmt.fmtUsd(size)}) · спот · защита: ${guardWhy} · стоп/цель по ATR`,
+        detail: state.mode === "live"
+          ? `${Fmt.fmtNum(size)} USDT · покупка на OKX идёт автоматически · защита: ${guardWhy} · стоп/цель по ATR`
+          : `${Fmt.fmtNum(size)} ХРЮ (≈ ${Fmt.fmtUsd(size)}) · спот · защита: ${guardWhy} · стоп/цель по ATR`,
         sym: res.sym,
         notify: { kind: "ai_open" },
       });
@@ -2115,25 +2312,34 @@ const Store = (() => {
     // Флип — реакция на РАЗВОРОТ картины факторов, а НЕ способ выйти из убытка:
     // гейт flipAllowed запрещает закрывать флипом убыточную позицию раньше стопа.
     if (aiPos && res.verdict !== "wait" && res.verdict !== aiPos.side) {
+      // R53: шорт-вердикт в ЛЮБОМ режиме = выход из лонга (шорт не открываем)
+      const shortExit = res.verdict === "шорт";
       const fg = flipAllowed(aiPos, res, effConf, thr, sym);
       if (fg.ok) {
         const price0 = (state.prices[sym] && state.prices[sym].price) || aiPos.entry;
-        const closed = Engine.closeTrade(aiPos, price0, "ИИ-флип");
+        const closed = Engine.closeTrade(aiPos, price0, shortExit ? "ИИ-выход (разворот вниз)" : "ИИ-флип");
         state.userPositions = state.userPositions.filter((p) => p.id !== aiPos.id);
         state.userClosed = [closed, ...state.userClosed].slice(0, 300);
-        state.balance += closed.size + closed.pnl;
+        if (state.mode !== "live") state.balance += closed.size + closed.pnl; // R52: live — без ХРЮ
         learnFromClosed(closed);
         state._flipAt = { ...(state._flipAt || {}), [sym]: Date.now() };
         pushEvent({
-          tone: res.verdict === "лонг" ? "bull" : "bear",
-          title: `ИИ флипнул ${sym}: ${aiPos.side} → ${res.verdict}`, detail: `закрыто по ${closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))} ХРЮ (≈ ${closed.pnl >= 0 ? "+" : "−"}$${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))}) · разворот факторов (уверенность ${res.confidence}%)`, sym,
+          tone: "bear",
+          title: shortExit
+            ? `ИИ вышел из лонга ${sym}: факторы развернулись вниз`
+            : `ИИ флипнул ${sym}: ${aiPos.side} → ${res.verdict}`,
+          detail: state.mode === "live"
+            ? `закрыто по ${closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))} USDT · шорт на споте невозможен — выходим в кэш, токен продаётся на OKX`
+            : `закрыто по ${closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))} ХРЮ (≈ ${closed.pnl >= 0 ? "+" : "−"}$${Fmt.fmtNum(Math.abs(Math.round(closed.pnl)))}) · ${shortExit ? "шортов больше нигде нет — выходим в кэш" : `разворот факторов (уверенность ${res.confidence}%)`}`, sym,
           notify: { kind: "ai_flip", data: { pnl: closed.pnl } },
         });
-        const sc = aiSizeCalc();
-        if (guard.ok && rg.ok && sc.size > 0) {
-          aiOpenInternal(res, sc.size, true, "скам-фильтр, новости и риск-гвард ок");
-          state._aiLastEntryAt = Date.now();
-          state.aiLastEntryTs = Date.now(); // R28: флип-вход тоже считается входом автопилота
+        if (!shortExit) {
+          const sc = aiSizeCalc();
+          if (guard.ok && rg.ok && sc.size > 0) {
+            aiOpenInternal(res, sc.size, true, "скам-фильтр, новости и риск-гвард ок");
+            state._aiLastEntryAt = Date.now();
+            state.aiLastEntryTs = Date.now(); // R28: флип-вход тоже считается входом автопилота
+          }
         }
         persist();
         return;
@@ -2184,6 +2390,9 @@ const Store = (() => {
     // одинаковыми лонгами, но при этом автопилот успевает набрать позицию в рамках лимитов
     // (раньше окно было 8 минут — пользователь просил торговать активнее, «да побольше»)
     if (Date.now() - (state._aiLastEntryAt || 0) < 4 * 60000) return;
+    // R53: шорт-вход невозможен нигде (демо = реальный рынок 1:1, спот OKX) —
+    // идея не создаётся (фильтр в updateIdeas), вход не открывается
+    if (res.verdict === "шорт") return;
     if (!aiPos && res.verdict !== "wait" && effConf >= thr && (res.agreeShare == null || res.agreeShare >= 0.55) && aiCount < effMaxPos()) {
       if (!guard.ok || !rg.ok) return;
       if (!heatGuard().ok) return;
@@ -2227,6 +2436,15 @@ const Store = (() => {
   }
 
   function totalEquity() {
+    // R52: в live капитал — реальные USDT на бирже + плавающий PnL позиций
+    if (state.mode === "live") {
+      let v = state.okx && Number.isFinite(state.okx.balanceUSDT) ? state.okx.balanceUSDT : 0;
+      for (const p of state.userPositions) {
+        const price = (state.prices[p.sym] && state.prices[p.sym].price) || p.entry;
+        v += Engine.positionPnl(p, price).pnl;
+      }
+      return v;
+    }
     let v = state.balance;
     for (const p of state.userPositions) {
       const price = (state.prices[p.sym] && state.prices[p.sym].price) || p.entry;
@@ -2401,7 +2619,7 @@ const Store = (() => {
       state.labClosed = [...labClosedAdd, ...state.labClosed].slice(0, 300);
       state.userPositions = state.userPositions.filter((p) => !userIds.has(p.id));
       state.userClosed = [...userClosedAdd, ...state.userClosed].slice(0, 300);
-      state.balance += userClosedAdd.reduce((sum, c) => sum + c.size + c.pnl, 0);
+      if (state.mode !== "live") state.balance += userClosedAdd.reduce((sum, c) => sum + c.size + c.pnl, 0); // R52: live — без ХРЮ
       // R32: в серверном режиме выход реплеится НА СЕРВЕР (детерминированно, по pid):
       // сервер закроет той же логикой, могилки/union схлопнут двойные исполнения
       if (serverMode()) {
@@ -2421,11 +2639,16 @@ const Store = (() => {
         });
       }
       for (const e of exits) {
+        const liveUsdt = e.pos.owner === "user" && state.mode === "live"; // R52: реальные позиции — в USDT
         pushEvent({
           id: "x" + pidOfClosed(e.closed), // R31: детерминированный id — двойное исполнение одного закрытия даёт ОДНО событие в ленте
           tone: e.closed.pnl >= 0 ? "bull" : "bear",
-          title: `${e.pos.owner === "lab" ? "Лаборатория" : "Демо"}: ${e.pos.sym} закрыта ${e.closed.exitReason.toLowerCase()} · ${e.closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(e.closed.pnl)))} ХРЮ (≈ ${e.closed.pnl >= 0 ? "+" : "−"}$${Fmt.fmtNum(Math.abs(Math.round(e.closed.pnl)))})`,
-          detail: `стратегия: ${(Engine.STRATEGIES.find((x) => x.id === e.pos.strategy) || { name: "вручную" }).name}`,
+          title: liveUsdt
+            ? `Реальный рынок: ${e.pos.sym} закрыта ${e.closed.exitReason.toLowerCase()} · ${e.closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(e.closed.pnl)))} USDT`
+            : `${e.pos.owner === "lab" ? "Лаборатория" : "Демо"}: ${e.pos.sym} закрыта ${e.closed.exitReason.toLowerCase()} · ${e.closed.pnl >= 0 ? "+" : "−"}${Fmt.fmtNum(Math.abs(Math.round(e.closed.pnl)))} ХРЮ (≈ ${e.closed.pnl >= 0 ? "+" : "−"}$${Fmt.fmtNum(Math.abs(Math.round(e.closed.pnl)))})`,
+          detail: liveUsdt
+            ? `правило выхода: ${e.closed.exitReason} · токен продаётся на OKX, USDT вернутся на биржу`
+            : `стратегия: ${(Engine.STRATEGIES.find((x) => x.id === e.pos.strategy) || { name: "вручную" }).name}`,
           sym: e.pos.sym,
           notify: e.pos.owner === "lab"
             ? { kind: "lab", data: { pnl: e.closed.pnl } }
@@ -2535,7 +2758,7 @@ const Store = (() => {
     closed.id = `${pos.id}-c${ts}`;
     state.userPositions = state.userPositions.filter((p) => p.id !== pos.id);
     state.userClosed = [closed, ...state.userClosed].slice(0, 400);
-    state.balance += closed.size + closed.pnl;
+    if (state.mode !== "live") state.balance += closed.size + closed.pnl; // R52: live — без ХРЮ (догон работает только вне сервера)
     learnFromClosed(closed);
     if (closed.strategy === "ai" && (reason === "Стоп" || reason === "Провал")) noteAiStopBan(pos.sym); // R28: тихий час монете (догоняющий движок)
     pushEvent({
@@ -2841,6 +3064,9 @@ const Store = (() => {
     // жизнь без пользователя + синхронизация устройств
     catchUp, catchInfo: () => ({ lastCatchUp: state.lastCatchUp, lastRun: catchCtl.lastRun, busy: catchCtl.busy }),
     addPushSub, removePushSub, // R30: push-подписки устройств (Web Push)
+    setNtfy, generateNtfyTopic, // R50: резервный канал ntfy
+    setOkxAuto, // R51: аварийный выключатель авто-ордеров OKX
+    applyServerArchive, // R49: применение серверного архива из колбэков app.js (glmCfg)
     enableSync, syncPush, syncPull, syncInfo, exportBackup, importBackup, archiveAccount,
     clearClosedHistory,
     effAuto,

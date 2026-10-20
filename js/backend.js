@@ -159,6 +159,47 @@ const Server = (() => {
     }
   }
 
+  // R50: тестовое сообщение в резервный канал ntfy (диагностика доставки).
+  // Ответ несёт свежий архив (с ntfy.last) — применяется как у action/glmCfg.
+  async function ntfyTest(storeApply) {
+    if (!active()) return { ok: false, error: "бэкенд не активен" };
+    try {
+      const j = await api("/api/ntfy-test", { method: "POST", body: {}, timeoutMs: 30000 });
+      if (j && j.archive && typeof storeApply === "function") storeApply(j.archive);
+      return j;
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  }
+
+  // R49: конфиг GLM-аналитика сервера (включение/выключение 13-го фактора 24/7).
+  // Ответ несёт свежий архив (с вердиктом GLM) — применяется как у action.
+  async function glmCfg(payload, storeApply) {
+    if (!active()) return { ok: false, error: "бэкенд не активен" };
+    try {
+      const j = await api("/api/glmcfg", { method: "POST", body: { payload: payload || {} }, timeoutMs: 40000 });
+      ctl.lastOkAt = Date.now();
+      if (typeof storeApply === "function" && j.archive) storeApply(j.archive);
+      return j.result || { ok: true };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  }
+
+  // R51: ПОЛНАЯ СИНХРОНИЗАЦИЯ OKX — подключение/отключение ключей НА СЕРВЕРЕ.
+  // Сервер сам проверяет ключи запросом баланса; секреты в браузер не возвращаются.
+  async function okxCfg(payload, storeApply) {
+    if (!active()) return { ok: false, error: "бэкенд не активен" };
+    try {
+      const j = await api("/api/okxcfg", { method: "POST", body: { payload: payload || {} }, timeoutMs: 45000 });
+      ctl.lastOkAt = Date.now();
+      if (typeof storeApply === "function" && j.archive) storeApply(j.archive);
+      return j.result || { ok: true };
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e) };
+    }
+  }
+
   // ---------- фоновый опрос ----------
   function startPolling(hook) {
     ctl.pollHook = hook;
@@ -182,7 +223,7 @@ const Server = (() => {
 
   return {
     configured, active, sessionLogin, login, logout,
-    pull, action, bootstrap, pushSub, pushUnsub, pushTest, startPolling, info,
+    pull, action, glmCfg, okxCfg, bootstrap, pushSub, pushUnsub, pushTest, ntfyTest, startPolling, info,
     _ctl: ctl,
   };
 })();

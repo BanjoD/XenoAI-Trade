@@ -10,10 +10,13 @@
 
 import {
   AccountBrain, defaultArchive, normalizeBrain, validArchive, applyServerFields, fpOf, mergeArchives,
-  adoptBrain, mergeBrainGlobal, mergeShadowGlobal,
+  adoptBrain, mergeBrainGlobal, mergeShadowGlobal, normalizeNtfy, NTFY_TOPIC_RE, normalizeOkx,
 } from "./account.js";
 import { fetchTickers, fetchKlines, fetchTickerOne, fetchAggTrades } from "./market.js";
 import { sendPush } from "./webpush.js";
+import {
+  fetchUsdtBalance, marketBuyWithFill, marketSellWithFill, testKeys as okxTestKeys,
+} from "./okx.js";
 import { DataLib } from "./core.js";
 
 const WATCH_SYMS = DataLib.WATCHLIST.map((i) => i.sym);
@@ -23,9 +26,11 @@ const NEWS_MS = 10 * 60000;      // новостная лента раз в 10 �
 const SCAN_PER_TICK = 8;         // монет в скане за тик (ротация по кругу ≈ каждые 6-7 мин на монету)
 const HUB_LOGIN = "__hub";       // R47: имя DO-хранилища ЕДИНОГО мозга ИИ (не аккаунт)
 const HUB_SYNC_MS = 4 * 60000;   // синхронизация с общим мозгом не чаще раза в 4 минуты
-export const BUILD = "r47";
+export const BUILD = "r53";
 
 const PASSWORDS = { david: "ETH123aAgo", yura: "BTCmyB671" };
+
+const normalizeOkxDefault = (v) => normalizeOkx(v || null); // R51: нормализация публичного состояния OKX с дефолтом
 
 // детерминированный код синхронизации логина (тот же алгоритм, что в js/auth.js):
 // sha256("xenoai-sync-v1|<логин>|<пароль>") → первые 16 hex-символов
@@ -163,7 +168,20 @@ export class Room {
       }
       this.brainObj = new AccountBrain(this.state, this.globalBrain || normalizeBrain(null), {
         fetchTickers, fetchKlines, fetchTickerOne, fetchAggTrades,
+        // R51: клиент OKX для полной синхронизации (баланс, авто-покупка/продажа)
+        okx: { fetchUsdtBalance, marketBuyWithFill, marketSellWithFill },
       });
+      // R49: конфиг GLM-аналитика (с ключом) живёт в storage DO отдельно от архива:
+      // /state отдаёт архив на все устройства — ключ не должен туда попадать
+      try {
+        const gc = await this.ctx.storage.get("glm");
+        if (gc && typeof gc === "object") this.brainObj.glmCfg = gc;
+      } catch (e) { /* нет конфига — GLM выключен */ }
+      // R51: ключи OKX (полная синхронизация) — тоже только в storage DO
+      try {
+        const oc = await this.ctx.storage.get("okx");
+        if (oc && typeof oc === "object" && oc.apiKey) this.brainObj.okxCfg = oc;
+      } catch (e) { /* нет ключей — синхронизация выключена */ }
       // R47 — КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ ПАМЯТИ ИИ: AccountBrain делает normalizeBrain(brain)
       // — это КОПИЯ, и всё обучение (learnFromClosed → веса/симстаты/порог/уроки) шло в неё.
       // saveBrain() при этом сохранял this.globalBrain — ОРИГИНАЛ, который обучение не
@@ -221,8 +239,9 @@ export class Room {
         const body = await req.json();
         await this.loadState(login);
         const b = await this.ensureBrain();
-        // перед торговым действием цены должны быть живыми (плейсмент проверяет свежесть)
-        if (["open", "close"].includes(body.type) && (!b.prices || !Object.keys(b.prices).length)) {
+        // перед торговым действием цены должны быть живыми (плейсмент проверяет свежесть);
+        // R49: liveOrder тоже — от цены биржи считается PnL реальных сделок
+        if (["open", "close", "liveOrder"].includes(body.type) && (!b.prices || !Object.keys(b.prices).length)) {
           try {
             const pairs = DataLib.WATCHLIST.filter((i) => i.pair).map((i) => i.pair);
             const { rows } = await fetchTickers(pairs);
@@ -237,6 +256,40 @@ export class Room {
           } catch (e) { /* цены недоступны — действие честно получит ошибку свежести */ }
         }
         const res = b.action(body.type, body.payload);
+        if (res.ok) { this.state.updatedAt = Date.now(); this.state.rev = (this.state.rev || 0) + 1; await this.saveState(); }
+        // R51: очередь реальных ордеров OKX — разгребаем сразу после действия
+        // (вход в live-режиме ставит покупку; закрытие — продажу). okxSync —
+        // принудительное обновление баланса мимо 5-минутного троттла.
+        try {
+          let guard = 0;
+          while (await b.drainRealQueue()) { if (++guard >= 5) break; }
+          const synced = await b.okxBalanceSync(body.type === "okxSync");
+          if (synced) { this.state.updatedAt = Date.now(); await this.saveState(); }
+        } catch (e) { this.lastError = "okx-drain: " + String((e && e.message) || e); }
+        if (b.newEvents.length) { this.state.updatedAt = Date.now(); await this.saveState(); }
+        const pushes = await this.sendEvents(b.newEvents || []);
+        b.newEvents = [];
+        return json({ ok: res.ok, error: res.error || null, result: res, archive: this.state, pushes });
+      }
+      // R49: конфиг GLM-аналитика сервера — отдельно от action (async: сразу спрашиваем
+      // модель и возвращаем вердикт/ошибку в ответе кнопки). Ключ хранится в storage DO.
+      if (path === "/glmcfg" && req.method === "POST") {
+        const body = await req.json();
+        await this.loadState(login);
+        const b = await this.ensureBrain();
+        const res = await this.glmCfgSave(b, body.payload || {});
+        if (res.ok) { this.state.updatedAt = Date.now(); this.state.rev = (this.state.rev || 0) + 1; await this.saveState(); }
+        const pushes = await this.sendEvents(b.newEvents || []);
+        b.newEvents = [];
+        return json({ ok: res.ok, error: res.error || null, result: res, archive: this.state, pushes });
+      }
+      // R51: ПОЛНАЯ СИНХРОНИЗАЦИЯ OKX — подключение/отключение ключей (async: сразу
+      // проверяем ключи запросом баланса). Ключи живут ТОЛЬКО в storage DO.
+      if (path === "/okxcfg" && req.method === "POST") {
+        const body = await req.json();
+        await this.loadState(login);
+        const b = await this.ensureBrain();
+        const res = await this.okxCfgSave(b, body.payload || {});
         if (res.ok) { this.state.updatedAt = Date.now(); this.state.rev = (this.state.rev || 0) + 1; await this.saveState(); }
         const pushes = await this.sendEvents(b.newEvents || []);
         b.newEvents = [];
@@ -284,6 +337,13 @@ export class Room {
         await this.saveState();
         return json({ ok: true, ...res, subs: ((this.state.pushSubs) || []).length });
       }
+      // R50: тестовое сообщение в резервный канал ntfy (кнопка «Проверка ntfy»)
+      if (path === "/ntfytest" && req.method === "POST") {
+        await this.loadState(login);
+        const res = await this.ntfyTest();
+        await this.saveState();
+        return json({ ok: true, ...res, ntfy: this.state.ntfy || null });
+      }
       return json({ ok: false, error: "неизвестный маршрут DO: " + path }, 404);
     } catch (e) {
       this.lastError = String((e && e.message) || e);
@@ -322,6 +382,15 @@ export class Room {
 
       await b.tick({ scanSyms: all });
 
+      // R51: ПОЛНАЯ СИНХРОНИЗАЦИЯ OKX — очередь реальных ордеров + баланс биржи.
+      // Каждые 2 минуты по одной задаче: покупка/продажа на OKX-споте переживает
+      // перезапуск DO (очередь персистится в архиве).
+      try {
+        let guard = 0;
+        while (await b.drainRealQueue()) { if (++guard >= 3) break; }
+        await b.okxBalanceSync();
+      } catch (e) { this.lastError = "okx: " + String((e && e.message) || e); }
+
       this.lastTickAt = Date.now();
       if (!this.state.degraded) this.lastTickOk = this.lastTickAt;
       this.lastError = b.tickLog.length ? b.tickLog[0] : null;
@@ -350,11 +419,11 @@ export class Room {
   // ---------- Web Push по событиям ----------
   async sendEvents(events) {
     const subs = ((this.state && this.state.pushSubs) || []).filter((s) => s && s.endpoint && s.keys);
-    if (!subs.length || !events.length) return { sent: 0, dead: 0 };
+    if ((!subs.length && !this.ntfyActive()) || !events.length) return { sent: 0, dead: 0, ntfy: 0 };
     // потолок: 2 события за вызов (лимит исходящих запросов), самые свежие
     // R46: потолок поднят 2 → 4 события за вызов (было 2 — при нескольких сделках в тик часть уведомлений терялась)
     const list = events.filter((e) => e && e.notify && e.notify.kind).slice(0, 4);
-    if (!list.length) return { sent: 0, dead: 0 };
+    if (!list.length) return { sent: 0, dead: 0, ntfy: 0 };
     const deadEndpoints = [];
     let sent = 0;
     for (const ev of list) {
@@ -381,8 +450,74 @@ export class Room {
     if (deadEndpoints.length) {
       this.state.pushSubs = (this.state.pushSubs || []).filter((s) => !deadEndpoints.includes(s.endpoint));
     }
-    return { sent, dead: deadEndpoints.length };
+    // R50: резервный канал ntfy — тот же список событий, независимо от Web Push.
+    // lab/signal исключены (частые; по умолчанию выключены и в локальных настройках).
+    const ntfySent = await this.sendNtfy(list);
+    return { sent, dead: deadEndpoints.length, ntfy: ntfySent };
   }
+
+  // ---------- R50: резервный канал доставки · ntfy ----------
+  // Работает ПОМИМО Web Push: приложение ntfy (Google Play/F-Droid) получает сообщения
+  // собственным соединением с ntfy.sh и показывает их при полностью закрытом браузере —
+  // туда, где Chrome не будит service worker в фоне (агрессивные OEM-менеджеры батареи).
+  // Единственная «авторизация» — несгадываемая случайная тема (как пароль из 32^10).
+  ntfyActive() {
+    const n = this.state && this.state.ntfy;
+    return Boolean(n && n.on && NTFY_TOPIC_RE.test(String(n.topic || "")));
+  }
+
+  ntfyTone(ev) {
+    if (ev.tone === "bear") return { priority: "high", tags: "chart_with_downwards_trend" };
+    if (ev.tone === "bull") return { priority: "default", tags: "chart_with_upwards_trend" };
+    return { priority: "default", tags: "bell" };
+  }
+
+  async ntfySend(title, body, tone) {
+    const n = normalizeNtfy(this.state && this.state.ntfy);
+    if (!n.on || !n.topic) return { ok: false, why: "канал выключен" };
+    const t = this.ntfyTone({ tone });
+    let status = 0, ok = false, err = "";
+    try {
+      const r = await fetch("https://ntfy.sh/" + n.topic, {
+        method: "POST",
+        headers: { "X-Title": String(title || "XenoAI Trade").slice(0, 200), "X-Priority": t.priority, "X-Tags": t.tags },
+        body: String(body || "").slice(0, 900) || "Событие XenoAI Trade",
+        signal: AbortSignal.timeout(8000),
+      });
+      status = r.status; ok = r.ok;
+      if (!r.ok) err = "HTTP " + r.status + (r.status === 429 ? " (лимит ntfy.sh)" : "");
+    } catch (e) {
+      err = String((e && e.message) || e).slice(0, 120);
+    }
+    this.state.ntfy = normalizeNtfy({ on: true, topic: n.topic, last: { ts: Date.now(), status, ok } });
+    return { ok, status, err };
+  }
+
+  async sendNtfy(events) {
+    if (!this.ntfyActive()) return 0;
+    let n = 0;
+    for (const ev of events) {
+      // частые события не дублируем в ntfy: лаборатория и сигналы сканера шумят
+      const kind = ev && ev.notify && ev.notify.kind;
+      if (kind === "lab" || kind === "signal") continue;
+      const r = await this.ntfySend(ev.title, ev.detail || ev.title, ev.tone);
+      if (r.ok) n++;
+    }
+    return n;
+  }
+
+  // R50: тестовое сообщение в ntfy (кнопка «Проверка ntfy» в модалке)
+  async ntfyTest() {
+    if (!this.ntfyActive()) return { ok: false, error: "Канал ntfy выключен или тема не задана" };
+    const r = await this.ntfySend(
+      "XenoAI Trade · проверка резервного канала",
+      "Если это сообщение пришло в приложение ntfy — резервный канал работает и будет доставлять события сделок даже при полностью закрытом браузере. " + new Date().toISOString().slice(11, 19) + " UTC",
+      "neutral",
+    );
+    // ok = запрос выполнен; sent = ntfy.sh принял (HTTP 200); status/err — детали для UI
+    return { ok: true, sent: Boolean(r.ok), status: r.status || 0, err: r.err || "" };
+  }
+
 
   // ---------- R42: тестовый пуш по всем подпискам аккаунта (кнопка диагностики) ----------
   async pushTest() {
@@ -405,6 +540,84 @@ export class Room {
       this.state.pushSubs = (this.state.pushSubs || []).filter((s) => !deadEndpoints.includes(s.endpoint));
     }
     return { results, sent: results.filter((r) => r.ok).length };
+  }
+
+  // ---------- R49: GLM-аналитик на сервере (конфиг из модалки GLM) ----------
+  // Ключ хранится ТОЛЬКО в storage DO (в архив не попадает — /state раздаётся устройствам).
+  // on=false конфиг не стирает: повторное включение не требует повторно вставлять ключ.
+  async glmCfgSave(b, p) {
+    const endpoint = String(p.endpoint || "").trim();
+    const model = String(p.model || "").trim() || "glm-4-flash";
+    const apiKey = String(p.apiKey || "").trim();
+    const on = Boolean(p.on);
+    if (endpoint && !/^https:\/\/.+/.test(endpoint)) return { ok: false, error: "Endpoint должен начинаться с https://" };
+    if (on && !apiKey && !(b.glmCfg && b.glmCfg.apiKey)) return { ok: false, error: "Вставьте API-ключ (bigmodel.cn или z.ai) — без ключа модель не спросить" };
+    const cur = b.glmCfg || {};
+    const cfg = {
+      endpoint: endpoint || cur.endpoint || "https://api.z.ai/api/paas/v4/chat/completions",
+      model,
+      apiKey: apiKey || cur.apiKey || "",
+      on,
+      ts: Date.now(),
+    };
+    if (on && !cfg.apiKey) return { ok: false, error: "Ключ не найден" };
+    b.glmCfg = cfg;
+    try { await this.ctx.storage.put("glm", cfg); } catch (e) { /* повторим при следующем сохранении */ }
+    let verdict = null;
+    if (on) {
+      verdict = await b.glmAsk(true).catch(() => null);
+      if (b.glmVerdict && b.glmVerdict.status === "error") {
+        return { ok: true, warning: b.glmVerdict.error || "модель ответила ошибкой", verdict: b.glmVerdict };
+      }
+      if (!b.glmEventsSeen) {
+        b.glmEventsSeen = true;
+        b.pushEvent({ tone: "neutral", title: "GLM-аналитик подключён на сервере", detail: `языковая модель (${cfg.model}) стала 13-м фактором ансамбля 24/7 — вердикт обновляется каждые 10 минут даже при закрытом браузере` });
+      }
+    } else {
+      b.pushEvent({ tone: "neutral", title: "GLM-аналитик на сервере выключен", detail: "12 рыночных факторов работают как раньше; ключ сохранён — включить можно в один клик" });
+    }
+    return { ok: true, verdict };
+  }
+
+  // ---------- R51: ПОЛНАЯ СИНХРОНИЗАЦИЯ OKX (конфиг из модалки реального рынка) ----------
+  // Ключи хранятся ТОЛЬКО в storage DO (в архив не попадают — /state раздаётся устройствам).
+  // Подключение = тест ключей запросом реального баланса; отключение стирает ключи.
+  async okxCfgSave(b, p) {
+    const apiKey = String(p.apiKey || "").trim();
+    const secret = String(p.secret || "").trim();
+    const pass = String(p.pass || "").trim();
+    const on = p.on !== false;
+    const mask = (k) => (k && k.length > 8 ? k.slice(0, 4) + "…" + k.slice(-4) : "…");
+    if (!on) {
+      // отключение: ключи стираются насовсем (повторное включение требует их заново)
+      b.okxCfg = null;
+      try { await this.ctx.storage.delete("okx"); } catch (e) { /* noop */ }
+      b.a.okx = normalizeOkxDefault();
+      b.pushEvent({ tone: "neutral", title: "Полная синхронизация OKX отключена", detail: "ключи стёрты с сервера; реальные ордера больше не отправляются (биржа ничего не хранит — деньги всегда были у вас)" });
+      return { ok: true };
+    }
+    if (!apiKey || !secret || !pass) return { ok: false, error: "Нужны все три: API-ключ, секрет и passphrase (OKX всегда требует passphrase)" };
+    const cfg = { apiKey, secret, pass, ts: Date.now() };
+    // тест ключей живым запросом баланса — не работает ключ, синхронизация не включится
+    let bal = null;
+    try {
+      bal = await okxTestKeys(cfg);
+    } catch (e) {
+      return { ok: false, error: "OKX не принял ключи: " + String((e && e.message) || e) };
+    }
+    b.okxCfg = cfg;
+    try { await this.ctx.storage.put("okx", cfg); } catch (e) { /* повторим при следующем сохранении */ }
+    b.a.okx = normalizeOkxDefault({
+      on: true, auto: p.auto !== false, mask: mask(apiKey),
+      balanceUSDT: bal.usdt, balanceEq: bal.total, ts: Date.now(), lastSync: Date.now(), lastErr: "",
+    });
+    b.pushEvent({
+      tone: "bull",
+      title: `OKX подключён к серверу · баланс ${Math.round(bal.usdt * 100) / 100} USDT`,
+      detail: "ПОЛНАЯ СИНХРОНИЗАЦИЯ активна: баланс биржи виден в платформе; входы в сделки (сигналы, автопилот, вручную) покупают токен на OKX-споте реальными USDT, закрытия продают его обратно — всё автоматически, 24/7, даже с выключенным браузером",
+      notify: { kind: "okx_conn" },
+    });
+    return { ok: true, usdt: bal.usdt };
   }
 
   // ---------- R47: ЕДИНЫЙ МОЗГ ИИ — хаб-синхронизация ----------

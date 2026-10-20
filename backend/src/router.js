@@ -126,6 +126,19 @@ export default {
         const r = await roomFetch(env, login, "/action", { method: "POST", body, headers: { "Content-Type": "application/json" } });
         return jsonCors(await r.json(), r.status);
       }
+      // R49: конфиг GLM-аналитика сервера (тот же формат ответа, что у /api/action)
+      if (path === "/api/glmcfg" && req.method === "POST") {
+        const body = await req.text();
+        const r = await roomFetch(env, login, "/glmcfg", { method: "POST", body, headers: { "Content-Type": "application/json" } });
+        return jsonCors(await r.json(), r.status);
+      }
+      // R51: полная синхронизация OKX — подключение/отключение ключей сервера.
+      // Ответ несёт свежий архив (публичное состояние okx); секреты наружу не едут.
+      if (path === "/api/okxcfg" && req.method === "POST") {
+        const body = await req.text();
+        const r = await roomFetch(env, login, "/okxcfg", { method: "POST", body, headers: { "Content-Type": "application/json" } });
+        return jsonCors(await r.json(), r.status);
+      }
       if (path === "/api/bootstrap" && req.method === "POST") {
         const body = await req.text();
         const r = await roomFetch(env, login, "/bootstrap", { method: "POST", body, headers: { "Content-Type": "application/json" } });
@@ -134,6 +147,11 @@ export default {
       // R42: тестовый пуш с сервера по подпискам аккаунта (диагностика доставки)
       if (path === "/api/push-test" && req.method === "POST") {
         const r = await roomFetch(env, login, "/pushtest", { method: "POST" });
+        return jsonCors(await r.json(), r.status);
+      }
+      // R50: тестовое сообщение в резервный канал ntfy (кнопка «Проверка ntfy»)
+      if (path === "/api/ntfy-test" && req.method === "POST") {
+        const r = await roomFetch(env, login, "/ntfytest", { method: "POST" });
         return jsonCors(await r.json(), r.status);
       }
 

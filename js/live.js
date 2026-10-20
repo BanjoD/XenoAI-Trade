@@ -327,7 +327,19 @@ const Live = (() => {
         tgtCcy: side === "BUY" ? "quote_ccy" : "base_ccy",
       });
     }
-    return { exchange, raw: res, side: p.side, sym: p.sym, amountUSDT: p.amountUSDT, qty, ts: Date.now() };
+    // R49: фактическая цена исполнения (если биржа её вернула) — уезжает на сервер
+    // для точного PnL реальных сделок; без неё сервер возьмёт свой живой кэш цены
+    let fill = null;
+    try {
+      if (Array.isArray(res.fills) && res.fills.length) {
+        let q = 0, sum = 0;
+        for (const f2 of res.fills) { const px = Number(f2.price), qt = Number(f2.qty); if (px > 0 && qt > 0) { sum += px * qt; q += qt; } }
+        if (q > 0) fill = sum / q;
+      }
+      if (fill == null && res.retExtInfo && res.retExtInfo.list && res.retExtInfo.list[0] && Number(res.retExtInfo.list[0].avgPrice) > 0) fill = Number(res.retExtInfo.list[0].avgPrice);
+      if (fill == null && res.data && res.data[0] && Number(res.data[0].avgPx) > 0) fill = Number(res.data[0].avgPx);
+    } catch (e) { /* цены нет — сервер возьмёт кэш */ }
+    return { exchange, raw: res, side: p.side, sym: p.sym, amountUSDT: p.amountUSDT, qty, price: fill || p.price || null, ts: Date.now() };
   }
 
   function acceptRisk(on) {

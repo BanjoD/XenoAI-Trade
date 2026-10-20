@@ -361,11 +361,13 @@ const ViewsTrade = (() => {
             <div style="grid-column:1/-1"><div class="k">провал закроется за (тело +${S().failPct == null ? 50 : S().failPct}%) · дальше только цель</div><div class="text-red">${fmtPrice(Engine.failLineOf({ side: r.verdict, entry: r.price, stop: r.stop }, S().failPct == null ? 50 : S().failPct))}</div></div>
           </div>
           <div class="ai-factors">${factorRows}</div>
-          ${live
-            ? `<button class="ai-open" data-action="live:order-ai">Отправить рыночный ордер по сигналу ИИ</button>`
-            : sc.size > 0
-              ? `<button class="ai-open" data-action="ai:open">Открыть ${r.verdict} по сигналу ИИ · ${Fmt.fmtNum(sc.size)} ХРЮ (≈ ${Fmt.fmtUsd(sc.size)})</button>`
-              : `<div class="ai-wait">ИИ-сделка не влезает в лимиты: свободно ${Fmt.fmtNum(Math.round(Store.aiTotalRemain()))} ХРЮ суммарного лимита при балансе ${Fmt.fmtNum(Math.round(s.balance))} ХРЮ. Поднимите лимиты или пополните счёт.</div>`}
+          ${!isLong
+            ? `<div class="ai-wait">Шортов больше нигде нет — демо повторяет реальный рынок 1:1: спот OKX умеет только купить токен за USDT и продать его обратно. Дождитесь лонг-сигнала.</div>`
+            : live
+              ? `<button class="ai-open" data-action="ai:open">Купить на OKX по сигналу ИИ · ${sc.size > 0 ? Fmt.fmtNum(sc.size) + " USDT" : "баланс синхронизируется…"}</button>`
+              : sc.size > 0
+                ? `<button class="ai-open" data-action="ai:open">Открыть ${r.verdict} по сигналу ИИ · ${Fmt.fmtNum(sc.size)} ХРЮ (≈ ${Fmt.fmtUsd(sc.size)})</button>`
+                : `<div class="ai-wait">ИИ-сделка не влезает в лимиты: свободно ${Fmt.fmtNum(Math.round(Store.aiTotalRemain()))} ХРЮ суммарного лимита при балансе ${Fmt.fmtNum(Math.round(s.balance))} ХРЮ. Поднимите лимиты или пополните счёт.</div>`}
           <div class="ai-ts"><span>расчёт ${Fmt.fmtClock(fresh.ts)} · RR 1:2 · согласие факторов ${Math.round((r.agreeShare || 0) * 100)}% · спот</span><button class="link-btn" data-action="ai:analyze" data-arg="${sym}">пересчитать</button></div>
         </div>`;
       }
@@ -380,6 +382,9 @@ const ViewsTrade = (() => {
     const cfg = GLM.getSettings();
     const st = GLM.status();
     const presets = GLM.presets();
+    const s = S();
+    const srv = s.glmSrv || null;
+    const srvOn = Server.active();
     const statusHtml = !cfg.apiKey
       ? `<div class="ai-wait" style="margin-top:0">Ключа нет: GLM работает как обычный аналитик «на бумаге» — в ансамбль не входит. Получите бесплатный ключ (bigmodel.cn или z.ai) и вставьте ниже.</div>`
       : st.status === "ok"
@@ -387,6 +392,17 @@ const ViewsTrade = (() => {
         : st.status === "error"
           ? `<div class="ai-wait" style="margin-top:0;color:#f87171">Ошибка: ${h.esc(st.error || "")}</div>`
           : `<div class="ai-wait" style="margin-top:0">Статус: ${st.status === "asking" ? "запрос к модели…" : "ключ сохранён, ждём опроса"}</div>`;
+    // R49: состояние GLM-аналитика на СЕРВЕРЕ (13-й фактор 24/7, вердикт считает DO)
+    const srvHtml = !srvOn
+      ? `<div class="ai-wait" style="margin-top:0">Сервер недоступен — включите серверный режим в «Кабинете».</div>`
+      : !srv
+        ? `<div class="ai-wait" style="margin-top:0">На сервере GLM ещё не включён — автопилот работает без 13-го фактора.</div>`
+        : srv.status === "ok"
+          ? `<div class="sync-state"><span class="np-ok">сервер: ${srv.bias === "flat" ? "вне рынка" : h.esc(srv.bias || "—")} ${srv.confidence}%</span><div class="num" style="margin-top:6px;font-size:12px">${h.esc(srv.model || "")} · ${srv.ts ? Fmt.fmtClock(srv.ts) : ""}<br><span style="color:#a99bb5">${h.esc(srv.reasoning || "")}</span></div></div>`
+          : `<div class="ai-wait" style="margin-top:0;color:#f87171">Сервер: ошибка модели — ${h.esc(srv.error || "")}</div>`;
+    const srvActions = !srvOn ? "" : srv && srv.status
+      ? `<button class="btn-ghost" data-action="glm:server">${h.icon("zap", 13)} ${srv.status === "ok" ? "Обновить ключ на сервере" : "Включить на сервере"}</button>${cfg.apiKey ? `<button class="btn-ghost" data-action="glm:serveroff">Выключить на сервере</button>` : ""}`
+      : `<button class="ai-open" data-action="glm:server">Включить на сервере 24/7</button>`;
     return `
     <div>
       <div class="cab-head">
@@ -424,6 +440,10 @@ const ViewsTrade = (() => {
           ${cfg.apiKey ? `<button class="btn-ghost" data-action="glm:off">Выключить фактор</button>` : ""}
           <button class="btn-ghost" data-action="modal:close">Закрыть</button>
         </div>
+        <div class="notify-sec" style="margin-top:14px">GLM на сервере · 24/7</div>
+        <div class="ai-limit-note">Сервер сам спрашивает модель каждые 10 минут — даже при закрытом браузере. Вердикт становится 13-м фактором ансамбля для автопилота и лаборатории. Ключ уедет в хранилище вашего аккаунта на сервере (на устройства не раздаётся).</div>
+        ${srvHtml}
+        <div class="notify-actions" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">${srvActions}</div>
       </div>
     </div>`;
   }
@@ -433,6 +453,7 @@ const ViewsTrade = (() => {
     const s = S();
     const f = s._form || (s._form = { sym: defaultSym, side: "лонг", size: "500", lev: 1 });
     if (defaultSym && !compact) f.sym = f.sym || defaultSym;
+    f.side = "лонг"; // R53: шортов больше нигде — форма всегда лонг (и старое состояние формы тоже)
 
     // ---- реальный режим ----
     if (s.mode === "live") return liveForm(f);
@@ -444,8 +465,8 @@ const ViewsTrade = (() => {
     const price = (s.prices[f.sym] && s.prices[f.sym].price) || 0;
     const sizeNum = Number(String(f.size).replace(",", ".")) || 0;
     const risk = price * 0.02;
-    const stop = f.side === "лонг" ? price - risk : price + risk;
-    const target = f.side === "лонг" ? price + risk * 2 : price - risk * 2;
+    const stop = price - risk;    // R53: только лонг — демо повторяет реальный рынок 1:1
+    const target = price + risk * 2;
 
     const syms = `<div class="chip-row scroll" style="margin-bottom:8px">` + DataLib.WATCHLIST.map((i) => `
       <button class="chip ${f.sym === i.sym ? "active" : ""}" style="padding:6px 10px;font-size:12px" data-action="form:sym" data-arg="${i.sym}">${h.coin(i.sym, 16)} ${i.sym}</button>`).join("") + `</div>`;
@@ -458,8 +479,7 @@ const ViewsTrade = (() => {
       </div>
       ${syms}
       <div class="seg2">
-        <button class="seg-btn ${f.side === "лонг" ? "long-on" : ""}" data-action="form:side" data-arg="лонг">лонг · тренд вверх</button>
-        <button class="seg-btn ${f.side === "шорт" ? "short-on" : ""}" data-action="form:side" data-arg="шорт">шорт · тренд вниз</button>
+        <button class="seg-btn long-on" data-action="form:side" data-arg="лонг">лонг · тренд вверх</button>
       </div>
       <div class="tform-row">
         <div class="inp-wrap">
@@ -473,10 +493,10 @@ const ViewsTrade = (() => {
         <div><div class="k">стоп −2%</div><div class="text-red">${fmtPrice(stop)}</div></div>
         <div><div class="k">цель +4%</div><div class="text-green">${fmtPrice(target)}</div></div>
       </div>
-      <button class="btn-open ${f.side === "лонг" ? "long" : "short"}" data-action="form:submit">
-        ${f.side === "лонг" ? "Открыть лонг" : "Открыть шорт"} · ${sizeNum ? Fmt.fmtNum(sizeNum) : "0"} ХРЮ${sizeNum ? ` (≈ ${Fmt.fmtUsd(sizeNum)})` : ""}
+      <button class="btn-open long" data-action="form:submit">
+        Открыть лонг · ${sizeNum ? Fmt.fmtNum(sizeNum) : "0"} ХРЮ${sizeNum ? ` (≈ ${Fmt.fmtUsd(sizeNum)})` : ""}
       </button>
-      <p class="tform-note">Спот · без плеча · курс 1 ХРЮ = $1 — профит/убыток в хрювнах равен долларовому · исполнение по реальной рыночной цене</p>
+      <p class="tform-note">Спот · без плеча · только лонги — демо повторяет реальный рынок 1:1 (спот OKX) · курс 1 ХРЮ = $1 · исполнение по реальной рыночной цене</p>
     </div>`;
   }
 
@@ -532,10 +552,12 @@ const ViewsTrade = (() => {
   }
 
   // ================= СДЕЛКИ =================
-  // ================= моя статистика (мои демо-сделки) =================
+  // ================= моя статистика (мои сделки) =================
   function myStatsBlock() {
     const s = S();
-    const closed = s.userClosed;
+    const live = s.mode === "live"; // R52: реальный рынок — суммы в USDT
+    const amt = (v, sign, cls) => live ? h.usdAmount(v, sign, cls) : h.hruAmount(v, sign, cls);
+    const closed = live ? s.userClosed.filter((c) => c.side === "лонг") : s.userClosed;
     const wins = closed.filter((c) => c.pnl > 0);
     const losses = closed.filter((c) => c.pnl <= 0);
     const total = closed.reduce((sum, c) => sum + c.pnl, 0);
@@ -552,14 +574,14 @@ const ViewsTrade = (() => {
     }
     const heldMid = s.userPositions.length ? holdSum / s.userPositions.length / 60000 : 0;
     return `<div class="stat-grid cols4">
-      ${h.statCard("Реализовано", h.hruAmount(total, true, total >= 0 ? "text-green" : "text-red"), "",
-        closed.length ? `${closed.length} закрытых · ≈ ${Fmt.fmtUsdSigned(total)} · комиссия 0.1% учтена` : "нет закрытых сделок")}
+      ${h.statCard("Реализовано", amt(total, true, total >= 0 ? "text-green" : "text-red"), "",
+        closed.length ? `${closed.length} закрытых · ≈ ${Fmt.fmtUsdSigned(total)} · комиссия биржи учтена` : (live ? "нет закрытых реальных сделок" : "нет закрытых сделок"))}
       ${h.statCard("Винрейт", closed.length ? `${Math.round(winrate)}%` : "—", closed.length ? (winrate >= 50 ? "text-green" : "text-red") : "text-dim",
-        closed.length ? `${wins.length} в плюс · ${losses.length} в минус` : "откройте первую сделку")}
-      ${h.statCard("Средняя сделка", closed.length ? h.hruAmount(avg, true, avg >= 0 ? "text-green" : "text-red") : "—", "",
-        closed.length ? `лучшая ${h.hruAmount(best, true)} · худшая ${h.hruAmount(worst, true)}` : "статистика появится после закрытия")}
-      ${h.statCard("В рынке", h.hruAmount(unreal, true, unreal >= 0 ? "text-green" : "text-red"), "",
-        `${s.userPositions.length} позиц. · объём ${Fmt.fmtNum(Math.round(volume))} ХРЮ ≈ ${Fmt.fmtUsd(Math.round(volume))}${s.userPositions.length ? ` · в среднем ${Fmt.fmtHeld(heldMid)}` : ""}`)}
+        closed.length ? `${wins.length} в плюс · ${losses.length} в минус` : (live ? "реальные сделки появятся после первого лонга" : "откройте первую сделку"))}
+      ${h.statCard("Средняя сделка", closed.length ? amt(avg, true, avg >= 0 ? "text-green" : "text-red") : "—", "",
+        closed.length ? `лучшая ${amt(best, true)} · худшая ${amt(worst, true)}` : "статистика появится после закрытия")}
+      ${h.statCard("В рынке", amt(unreal, true, unreal >= 0 ? "text-green" : "text-red"), "",
+        `${s.userPositions.length} позиц. · объём ${Fmt.fmtNum(Math.round(volume))} ${live ? "USDT · покупка на OKX" : `ХРЮ ≈ ${Fmt.fmtUsd(Math.round(volume))}`}${s.userPositions.length ? ` · в среднем ${Fmt.fmtHeld(heldMid)}` : ""}`)}
     </div>`;
   }
 
@@ -572,10 +594,11 @@ const ViewsTrade = (() => {
     const closed = tab === "user" ? s.userClosed : s.labClosed;
 
     const userPosRows = s.userPositions.length === 0
-      ? `<div class="empty">Нет открытых сделок — откройте через форму справа или возьмите сигнал</div>`
+      ? `<div class="empty">${s.mode === "live" ? "Нет открытых реальных сделок — возьмите лонг-сигнал или включите автопилот" : "Нет открытых сделок — откройте через форму справа или возьмите сигнал"}</div>`
       : `<div class="rows row-divide">` + s.userPositions.map((p) => {
           const price = (s.prices[p.sym] && s.prices[p.sym].price) || p.entry;
           const { pnl, pct } = Engine.positionPnl(p, price);
+          const livePos = s.mode === "live"; // R52: реальные позиции — в USDT
           return `<div class="trow" data-pos-sym="${p.sym}" data-pos-side="${p.side}" data-pos-entry="${p.entry}" data-pos-size="${p.size}" data-pos-lev="${p.lev || 1}">
             ${h.coin(p.sym, 36)}
             <div style="min-width:0;flex:1">
@@ -583,15 +606,15 @@ const ViewsTrade = (() => {
                 <span style="font-size:14px;font-weight:600">${p.sym}</span>
                 ${h.sideTag(p.side)}
                 ${p.strategy === "ai" ? h.tag("blue", p.ai && p.ai.auto ? "ИИ · автопилот" : "сигнал ИИ") : ""}
-                ${h.tag("orange", "в работе")}
+                ${livePos ? h.tag("orange", p.live ? "OKX · РЕАЛЬНАЯ" : (p.realPending ? "OKX · покупка идёт" : "реальный рынок")) : h.tag("orange", "в работе")}
               </div>
-              <div class="num" style="margin-top:2px;font-size:11.5px;color:#71717a">${Fmt.fmtNum(p.size)} ХРЮ · вход ${fmtPrice(p.entry)} · стоп ${fmtPrice(p.stop)} · цель ${fmtPrice(p.target)} · ${Fmt.fmtHeld((Date.now() - p.openedAt) / 60000)}</div>
+              <div class="num" style="margin-top:2px;font-size:11.5px;color:#71717a">${Fmt.fmtNum(p.size)} ${livePos ? "USDT · покупка на OKX" : "ХРЮ"} · вход ${fmtPrice(p.entry)} · стоп ${fmtPrice(p.stop)} · цель ${fmtPrice(p.target)} · ${Fmt.fmtHeld((Date.now() - p.openedAt) / 60000)}</div>
             </div>
             <div class="row-right">
-              <div data-pnl-main class="num ${pnl >= 0 ? "text-green" : "text-red"}" style="font-size:14.5px;font-weight:600">${h.hruAmount(pnl, true)} <span style="font-size:11px;opacity:.75">(${Fmt.fmtUsdSigned(pnl)})</span></div>
+              <div data-pnl-main class="num ${pnl >= 0 ? "text-green" : "text-red"}" style="font-size:14.5px;font-weight:600">${livePos ? h.usdAmount(pnl, true) : h.hruAmount(pnl, true)} <span style="font-size:11px;opacity:.75">(${Fmt.fmtUsdSigned(pnl)})</span></div>
               <div data-pnl-pct class="num ${pct >= 0 ? "text-green" : "text-red"}" style="font-size:12px">${pct >= 0 ? "+" : "−"}${Math.abs(pct).toFixed(2)}%</div>
             </div>
-            <button class="btn-close" data-action="pos:close" data-arg="${p.id}">Закрыть</button>
+            <button class="btn-close" data-action="pos:close" data-arg="${p.id}">${livePos ? "Продать" : "Закрыть"}</button>
           </div>`;
         }).join("") + `</div>`;
 
@@ -622,15 +645,16 @@ const ViewsTrade = (() => {
       ? `<div class="empty">Закрытых сделок пока нет</div>`
       : `<div class="rows row-divide">` + closed.slice(0, 12).map((c) => {
           const strat = Engine.STRATEGIES.find((x) => x.id === c.strategy);
+          const liveClosed = s.mode === "live"; // R52: реальные сделки — в USDT
           return `<div class="trow" style="padding-top:12px;padding-bottom:12px">
             ${h.coin(c.sym, 30)}
             <div style="min-width:0;flex:1">
-              <div style="font-size:13px"><span style="font-weight:500">${c.sym}</span> <span style="color:#71717a">${c.side} · ${Fmt.fmtNum(c.size)} ХРЮ · ${c.strategy === "ai" ? (c.ai && c.ai.auto ? "ИИ · автопилот" : "сигнал ИИ") : strat ? strat.short : "вручную"}</span></div>
+              <div style="font-size:13px"><span style="font-weight:500">${c.sym}</span> <span style="color:#71717a">${c.side} · ${Fmt.fmtNum(c.size)} ${liveClosed ? "USDT" : "ХРЮ"} · ${c.strategy === "ai" ? (c.ai && c.ai.auto ? "ИИ · автопилот" : "сигнал ИИ") : strat ? strat.short : "вручную"}</span></div>
               <div class="num" style="font-size:11.5px;color:#52525b">${fmtPrice(c.entry)} → ${fmtPrice(c.exit)} · держали ${Fmt.fmtHeld((c.closedAt - c.openedAt) / 60000)}</div>
             </div>
             ${h.tag(c.exitReason === "Стоп" ? "red" : c.exitReason === "Цель" ? "green" : "gray", c.exitReason)}
             <div style="width:104px;text-align:right">
-              <div class="num ${c.pnl >= 0 ? "text-green" : "text-red"}" style="font-size:13.5px;font-weight:500">${h.hruAmount(c.pnl, true)}</div>
+              <div class="num ${c.pnl >= 0 ? "text-green" : "text-red"}" style="font-size:13.5px;font-weight:500">${liveClosed ? h.usdAmount(c.pnl, true) : h.hruAmount(c.pnl, true)}</div>
               <div style="font-size:11px;color:#52525b">${ago(c.closedAt)}</div>
             </div>
           </div>`;
@@ -640,7 +664,7 @@ const ViewsTrade = (() => {
     <div class="stack">
       <div>
         <h1 class="page-title">Сделки</h1>
-        <p class="page-sub">Демо-торговля хрювнами по реальным ценам · открытых: ${s.userPositions.length + (showLab ? s.labPositions.length : 0)}</p>
+        <p class="page-sub">${s.mode === "live" ? "Реальный рынок · USDT на бирже OKX · только лонги (спот)" : `Демо-торговля хрювнами по реальным ценам · открытых: ${s.userPositions.length + (showLab ? s.labPositions.length : 0)}`}</p>
       </div>
       ${myStatsBlock()}
       <div class="trades-grid">
@@ -709,6 +733,17 @@ const ViewsTrade = (() => {
             </div>
             ${h.tag("blue", "отправлен")}
           </div>`).join("") + `</div>`;
+    // R49: ИИ учится на реальных сделках — сервер сводит покупки с продажами (FIFO),
+    // считает PnL и льёт опыт по монетам в общий мозг (тот же, что кормит автопилот)
+    const ls = s.liveStats || { n: 0, wins: 0, losses: 0, pnlUsdt: 0, since: 0 };
+    const statsHtml = !ls.n
+      ? `<div class="ai-limit-note" style="padding:10px 20px">Как только продажа закроет купленное на бирже, сервер посчитает результат сделки — и ИИ учтёт опыт по монете в будущих решениях (общий мозг, симбиас и уроки).</div>`
+      : `<div class="tform-stats num" style="margin:10px 20px;padding:10px 12px">
+          <div><div class="k">сделок учтено</div><div>${ls.n}</div></div>
+          <div><div class="k">винрейт</div><div class="${ls.wins * 2 >= ls.n ? "text-green" : "text-red"}">${Math.round((ls.wins / ls.n) * 100)}%</div></div>
+          <div><div class="k">итог PnL</div><div class="${ls.pnlUsdt >= 0 ? "text-green" : "text-red"}">${ls.pnlUsdt >= 0 ? "+" : "−"}$${Fmt.fmtNum(Math.abs(Math.round(ls.pnlUsdt)))}</div></div>
+        </div>
+        <div class="ai-limit-note" style="padding:0 20px 12px">Эти результаты уже в памяти ИИ: опыт реального рынка влияет на доверие к монетам (${Object.keys((Store.state.aiBrain && Store.state.aiBrain.symStats) || {}).length} монет в опыте) и виден в уроках мозга.</div>`;
     return `
     <section class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 20px;border-bottom:1px solid var(--border)">
@@ -716,6 +751,7 @@ const ViewsTrade = (() => {
         <span class="num" style="font-size:11.5px;color:#71717a">${Live.ordersAllowed() ? "отправка разрешена" : "отправка запрещена (подтвердите риск)"}</span>
       </div>
       ${rows}
+      ${statsHtml}
     </section>`;
   }
 
@@ -770,24 +806,63 @@ const ViewsTrade = (() => {
         </div>
       </div>`;
 
+    // ================= R51: ПОЛНАЯ СИНХРОНИЗАЦИЯ OKX =================
+    // Пользователь: «нужна полная синхронизация с OKX — всё по-настоящему».
+    // Ключи хранятся НА СЕРВЕРЕ (storage Durable Object): автопилот и сигналы 24/7
+    // сами покупают/продают токены на OKX-споте, даже с выключенным браузером.
+    const ox = (s.okx && typeof s.okx === "object") ? s.okx : { on: false, auto: false, mask: "", balanceUSDT: null, lastSync: 0, lastErr: "" };
+    const okxSynced = ox.lastSync ? Fmt.fmtClock(ox.lastSync) : null;
+    const okxCard = ox.on
+      ? `<div class="lm-card" style="border-color:rgba(74,222,128,.35)">
+          <div class="lm-card-head">${h.icon("zap", 16)} OKX · полная синхронизация <span class="tag" style="background:rgba(74,222,128,.15);color:#4ade80;margin-left:auto">АКТИВНА</span></div>
+          <div class="sync-state" style="margin:8px 0">
+            <span class="np-ok">подключено</span> · ключ <b class="num">${h.esc(ox.mask || "—")}</b> (хранится на сервере XenoAI, устройства его не видят)
+            <div class="num" style="margin-top:4px;font-size:12px">реальный баланс OKX: <b style="color:#f5c542">${ox.balanceUSDT != null ? Fmt.fmtNum(Math.round(ox.balanceUSDT * 100) / 100, 2) + " USDT" : "—"}</b>${okxSynced ? ` · обновлён ${okxSynced}` : ""}${s.mode === "live" ? " · режим: РЕАЛЬНЫЙ" : " · переключите «Демо/Реальный» для авто-ордеров"}</div>
+            ${ox.lastErr ? `<div class="num text-red" style="margin-top:4px;font-size:11.5px">ошибка синхронизации: ${h.esc(ox.lastErr)}</div>` : ""}
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:8px 0">
+            <span style="font-size:12px;color:#8d8098">Авто-ордера (вход = покупка, закрытие = продажа):</span>
+            <button class="toggle-pill ${ox.auto ? "active" : ""}" data-action="okx:auto">${ox.auto ? "включены" : "пауза"}</button>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="lm-btn" style="flex:0 0 auto;padding:8px 14px" data-action="okx:refresh">Обновить баланс</button>
+            <button class="lm-btn" style="flex:0 0 auto;padding:8px 14px;background:rgba(248,113,113,.12);border-color:rgba(248,113,113,.4)" data-action="okx:off">Отключить OKX</button>
+          </div>
+        </div>`
+      : `<div class="lm-card" style="border-color:rgba(245,197,66,.35)">
+          <div class="lm-card-head">${h.icon("zap", 16)} OKX · полная синхронизация (рекомендуется)</div>
+          <p class="lm-note">Ключи вводятся ОДИН раз и хранятся на сервере XenoAI: после этого <b>всё по-настоящему</b> —
+          баланс платформы показывает реальные USDT биржи; приняли сигнал (или автопилот вошёл) → на OKX <b>автоматически
+          покупается реальный токен</b> (USDT → токен); закрыли сделку → токен <b>автоматически продаётся</b> обратно
+          в USDT, профит/минус остаётся на бирже. Работает 24/7 даже с выключенным браузером.</p>
+          <input class="auth-inp lm-inp" id="okx-key" placeholder="API key" autocomplete="off">
+          <input class="auth-inp lm-inp" id="okx-secret" type="password" placeholder="Secret" autocomplete="off">
+          <input class="auth-inp lm-inp" id="okx-pass" type="password" placeholder="Passphrase (обязателен на OKX)" autocomplete="off">
+          <div class="lm-exnote">Создайте ключ на OKX: «API» → «Создать ключ API» → права <b>«Чтение» + «Торговля»</b>. Trade-пароль (passphrase) вы придумали при создании ключа. Рекомендуется белый список IP — см. отчёт сборки.</div>
+          <button class="lm-btn" data-action="okx:connect" ${s._okxBusy ? "disabled" : ""}>${s._okxBusy ? "Подключаю…" : "Подключить OKX и включить синхронизацию"}</button>
+        </div>`;
+
     return `
     <div>
       <div class="cab-head">
         <span class="cab-icon" style="background:rgba(255,45,120,.15);color:var(--accent-2)">${h.icon("candles", 22)}</span>
         <div>
           <h2 class="cab-title">Реальный рынок · подключение</h2>
-          <p class="cab-sub">Тумблер «Демо / Реальный» в сайдбаре переключает режимы · демо-ХРЮ не тратятся</p>
+          <p class="cab-sub">Тумблер «Демо / Реальный» переключает режимы · на реальном рынке всё в USDT с биржи, ХРЮ не участвуют</p>
         </div>
       </div>
       <div class="cab-body" style="display:flex;flex-direction:column;gap:12px">
+        ${okxCard}
         ${statusHtml}
         ${conn ? "" : `<div class="lm-grid">${walletCard}${keysCard}</div>`}
         ${riskHtml}
         ${st.lastError ? `<div class="auth-error" style="margin:0">${h.esc(st.lastError)}</div>` : ""}
       </div>
       <div class="cab-foot">
-        <p>Дорожная карта реальной торговли: 1) подключение — готово ✓ · 2) чтение баланса — готово ✓ ·
-        3) подписанные рыночные ордера Binance/Bybit/OKX — готово ✓ · 4) DEX-смарт-контракты и трекинг позиций — следующий шаг.</p>
+        <p>Порядок работы OKX-синхронизации: 1) ключи на сервере — готово ✓ · 2) реальный баланс USDT в платформе — готово ✓ ·
+        3) вход в сделку = авто-покупка токена на OKX — готово ✓ · 4) закрытие = авто-продажа, PnL по факту биржи — готово ✓ ·
+        5) только лонги: шортов на реальном рынке больше нет вовсе — спот OKX умеет только «купил токен → продал»; ИИ на реальном рынке применяет лонг-опыт (longTrades/longWins), шорт-вердикты открывают выход из лонга, а не шорт ·
+        6) всё в USDT: размеры сделок, лимиты, PnL и события — в реальных USDT с биржи; баланс демо-ХРЮ не трогается вовсе.</p>
         <button class="btn-ghost" data-action="modal:close">Закрыть</button>
       </div>
     </div>`;
@@ -899,7 +974,7 @@ const ViewsTrade = (() => {
           return `<div class="row" style="flex-wrap:wrap" data-pos-sym="${p.sym}" data-pos-side="${p.side}" data-pos-entry="${p.entry}" data-pos-size="${p.size}" data-pos-lev="${p.lev || 1}">
             ${h.coin(p.sym, 34)}
             <div style="min-width:0;flex:1">
-              <div style="font-size:13.5px;font-weight:600">${p.sym} <span style="font-size:11px;color:#71717a">${p.side}${p.strategy === "ai" && p.ai && p.ai.auto ? " · ИИ-автопилот" : p.strategy === "ai" ? " · ИИ" : ""}</span></div>
+              <div style="font-size:13.5px;font-weight:600">${p.sym} <span style="font-size:11px;color:#71717a">${p.side}${p.strategy === "ai" && p.ai && p.ai.auto ? " · ИИ-автопилот" : p.strategy === "ai" ? " · ИИ" : ""}</span>${p.live ? `<span class="tag" style="background:rgba(74,222,128,.14);color:#4ade80;margin-left:6px;font-size:9.5px">OKX · РЕАЛЬНЫЕ ${Fmt.fmtNum(Math.round((p.live.qty || 0) * 1e4) / 1e4)}</span>` : ""}${p.realPending && !p.live ? `<span class="tag" style="background:rgba(245,197,66,.14);color:#f5c542;margin-left:6px;font-size:9.5px">OKX · покупка идёт</span>` : ""}</div>
               <div class="num" style="font-size:11.5px;color:#71717a">${Fmt.fmtNum(p.size)} ХРЮ · ${fmtPrice(p.entry)} → <span data-pnl-price>${fmtPrice(price)}</span></div>
             </div>
             <div style="width:110px;text-align:right">
@@ -1199,9 +1274,19 @@ const ViewsTrade = (() => {
         поэтому сервер отправляет пуши в пустоту (HTTP 201 есть — уведомлений нет). Включите уведомления
         здесь — это одно нажатие: разрешение + новая подписка для этого домена.
       </div>` : "";
+    // R50: авто-диагноз «сервер шлёт (201), устройство молчит» — Chrome не будит SW в фоне.
+    const stuckAck = srvSubs.some((s) => s.last && s.last.ok) && !srvSubs.some((s) => s.lastAck && s.lastAck.ts);
+    const stuckBanner = (srvSubs.length && stuckAck && pc.on) ? `
+      <div class="notify-install" style="border:1px solid rgba(255,45,120,.45);background:rgba(255,45,120,.08)">
+        <b>Диагноз r50:</b> сервер доставляет пуши (HTTP 201), но это устройство ни разу не подтвердило
+        показ — Chrome не будит приложение в фоне. Проверьте чек-лист ниже (системное разрешение Chrome,
+        экономия батареи). Для гарантии включите резервный канал <b>ntfy</b> секцией ниже — он доставляет
+        события при полностью закрытом браузере, его Chrome глушить не умеет.
+      </div>` : "";
     const pushHtml = `
       <div class="notify-sec">Push на смартфон · даже при закрытом приложении</div>
       ${migrateBanner}
+      ${stuckBanner}
       <div class="notify-install">
         Пуши приходят <b>нативным механизмом браузера</b> — никаких сторонних приложений и настроек. Достаточно один раз <b>разрешить уведомления</b> выше: устройство само подписывается на пуши платформы, подписка синхронизируется в облако аккаунта, и сервер присылает сюда события сделок — входы ИИ, цели, провалы, флипы, авто-стоп — даже когда приложение полностью закрыто и выгружено из памяти. Пока приложение открыто, уведомления приходят мгновенно.
       </div>
@@ -1226,7 +1311,49 @@ const ViewsTrade = (() => {
         <button class="btn-lime" data-action="notify:push-test" title="Сервер отправит настоящий пуш по подпискам аккаунта">${h.icon("bell", 13)} Тестовый пуш с сервера</button>
         <span id="push-test-result"></span>
       </div>
-      <div class="ai-limit-note">Диагностика теперь двухсторонняя: <b>«сервер: HTTP 201»</b> — пуш принят сервисом доставки (FCM); <b>«устройство: показано»</b> — service worker устройства реально показал уведомление и подтвердил это серверу (r47). Все торговые пуши идут с <b>высоким приоритетом</b> (Urgency: high, TTL 12 ч) — будят устройство даже в Doze. Если 201 есть, а подтверждения устройства нет — пуш застрял на уровне Android/Chrome: (1) домен переехал — включите уведомления на этом домене (баннер выше); (2) Android 13+ — включите уведомления для самого Chrome: Настройки → Приложения → Chrome → Уведомления; (3) агрессивная экономия батареи (Xiaomi/Samsung/Huawei) душит Chrome в фоне — Настройки → Приложения → Chrome → Батарея → «Без ограничений»; (4) проверьте, не замучен ли сайт в Chrome (замок в адресной строке → Уведомления); (5) не помогает — нажмите «Пересоздать подписку». <b>HTTP 410</b> — подписка устарела: пересоздаётся сама или кнопкой выше.</div>`;
+      <div class="ai-limit-note">Диагностика теперь двухсторонняя: <b>«сервер: HTTP 201»</b> — пуш принят сервисом доставки (FCM); <b>«устройство: показано»</b> — service worker устройства реально показал уведомление и подтвердил это серверу (r47). Все торговые пуши идут с <b>высоким приоритетом</b> (Urgency: high, TTL 12 ч) — будят устройство даже в Doze. Если 201 есть, а подтверждения устройства нет — пуш застрял на уровне Android/Chrome: (1) домен переехал — включите уведомления на этом домене (баннер выше); (2) Android 13+ — включите уведомления для самого Chrome: Настройки → Приложения → Chrome → Уведомления; (3) агрессивная экономия батареи (Xiaomi/Samsung/Huawei) душит Chrome в фоне — Настройки → Приложения → Chrome → Батарея → «Без ограничений»; (4) проверьте, не замучен ли сайт в Chrome (замок в адресной строке → Уведомления); (5) не помогает — нажмите «Пересоздать подписку», а для гарантии — включите ntfy секцией ниже. <b>HTTP 410</b> — подписка устарела: пересоздаётся сама или кнопкой выше.</div>`;
+
+    // ---- R50: РЕЗЕРВНЫЙ КАНАЛ NTFY ----
+    // Независимая от Chrome доставка: приложение ntfy держит своё соединение и показывает
+    // события при полностью закрытом браузере — туда, где SW не будится в фоне.
+    const nt = (window.Store && Store.state.ntfy) || { on: false, topic: "", last: null };
+    const ntfyUrl = nt.topic ? "https://ntfy.sh/" + encodeURIComponent(nt.topic) : "";
+    const ntfyStatus = nt.on
+      ? `<span class="np-ok">включен · тема ${h.esc(nt.topic)}</span>`
+      : nt.topic
+        ? `<span class="np-warn">выключен · тема ${h.esc(nt.topic)}</span>`
+        : `<span class="np-warn">не настроен</span>`;
+    const ntfyLast = nt.last && nt.last.ts
+      ? `<span class="${nt.last.ok ? "np-ok" : "np-warn"}">ntfy.sh: HTTP ${nt.last.status || "—"} · ${hhOf(nt.last.ts)}</span>`
+      : `<span class="np-warn">отправок не было</span>`;
+    const ntfyHtml = `
+      <div class="notify-sec">Резервный канал · ntfy (работает всегда)</div>
+      <div class="notify-install">
+        Живая диагностика r50: сервер отправляет пуши исправно (FCM отвечает 201), но на части Android-устройств
+        Chrome не будит service worker в фоне — агрессивная экономия батареи (Xiaomi/Huawei/Samsung) и «убийцы»
+        фоновых приложений глушат доставку, поэтому уведомления приходят только пока приложение открыто.
+        <b>ntfy</b> — маленькое приложение (Google Play / F-Droid), которое получает события своим соединением
+        и показывает их при полностью закрытом браузере. Тема — случайный несгадываемый идентификатор:
+        события видит только тот, кто знает тему.
+      </div>
+      <div class="ai-limit-row" style="flex-wrap:wrap;gap:8px;align-items:center">
+        <span class="lbl">${h.icon("radio", 12)} канал</span>
+        ${ntfyStatus} · ${ntfyLast}
+      </div>
+      <div class="ai-limit-row" style="flex-wrap:wrap;gap:8px">
+        <input id="ntfy-topic" class="inp num" style="flex:1;min-width:170px" value="${h.esc(nt.topic || "")}" placeholder="тема ntfy (6–64 символа)" title="Тема ntfy — вставьте её в приложении ntfy" autocomplete="off" spellcheck="false">
+        <button class="btn-ghost" data-action="notify:ntfy-gen" title="Сгенерировать новую случайную тему">Новая тема</button>
+        <button class="btn-ghost" data-action="notify:ntfy-copy" title="Скопировать тему для вставки в ntfy">Копировать</button>
+      </div>
+      <div class="ai-limit-row" style="flex-wrap:wrap;gap:8px">
+        ${nt.on
+          ? `<button class="btn-ghost" data-action="notify:ntfy-off" title="Прекратить доставку в ntfy">Выключить канал</button>`
+          : `<button class="btn-lime" data-action="notify:ntfy-on" title="Включить доставку событий в ntfy">Включить канал</button>`}
+        <button class="btn-ghost" data-action="notify:ntfy-test" ${nt.on ? "" : "disabled"} title="Сервер отправит проверочное сообщение в ntfy">${h.icon("bell", 13)} Проверка ntfy</button>
+        <a class="btn-ghost" style="text-decoration:none;display:inline-flex;align-items:center;gap:5px" href="${ntfyUrl || "https://ntfy.sh"}" target="_blank" rel="noopener">${h.icon("swap", 13)} Открыть в ntfy</a>
+        <span id="ntfy-test-result"></span>
+      </div>
+      <div class="ai-limit-note"><b>Как включить (2 минуты):</b> 1) установите приложение <b>ntfy</b> из Google Play (или F-Droid); 2) нажмите «Новая тема», затем «Копировать»; 3) в приложении ntfy: «+» → подписаться на тему → вставьте скопированное; 4) вернитесь сюда и нажмите «Включить канал», затем «Проверка ntfy» — на телефон придёт сообщение. Дальше события сделок будут приходить туда сами: входы ИИ, цели, провалы, флипы, реальные ордера. Лаборатория и сигналы сканера в ntfy не дублируются — там шум.</div>`;
 
     const actionsHtml = `
       <div class="notify-actions">
@@ -1255,6 +1382,7 @@ const ViewsTrade = (() => {
         <div class="notify-sec">Режим доставки</div>
         ${extraHtml}
         ${pushHtml}
+        ${ntfyHtml}
         ${actionsHtml}
       </div>
     </div>`;

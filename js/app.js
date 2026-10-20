@@ -166,18 +166,21 @@ const App = (() => {
     const btc = s.prices.BTC ? s.prices.BTC.price : 0;
     const live = s.mode === "live";
     const conn = window.Live ? Live.state.conn : null;
-    const liveBal = window.Live ? Live.balanceUSDT() : null;
+    // R52: на реальном рынке главный баланс — РЕАЛЬНЫЕ USDT с OKX (серверная синхронизация);
+    // баланс браузерного подключения — резерв до первого синка сервера
+    const srvBal = s.okx && Number.isFinite(s.okx.balanceUSDT) ? s.okx.balanceUSDT : null;
+    const liveBal = srvBal != null ? srvBal : (window.Live ? Live.balanceUSDT() : null);
     const sourceLabel = s.degraded ? "нет источника" : (s.source || "подключение…");
 
     const balanceCard = live
       ? `
       <div class="balance-card">
         <div class="balance-row">
-          <span class="balance-label">Баланс биржи</span>
+          <span class="balance-label">Реальный баланс OKX</span>
           <span class="balance-value num">${liveBal != null ? Fmt.fmtNum(liveBal, 2) + " USDT" : "—"}</span>
         </div>
         <div class="balance-sub">
-          <span>${conn ? h.esc(conn.label) : "нет подключения"}</span>
+          <span>${conn ? h.esc(conn.label) : "OKX · полная синхронизация"}</span>
           <span class="${s.degraded ? "live-deg" : "live-ok"}">${sourceLabel}</span>
         </div>
         <div class="mode-seg" style="margin-top:8px">
@@ -245,7 +248,7 @@ const App = (() => {
       <div class="mh-row">
         ${h.xenoLogo()}
         <div class="mh-right">
-          <span class="mh-chip num" id="mh-balance">${Fmt.fmtNum(s.balance)} ХРЮ</span>
+          <span class="mh-chip num" id="mh-balance">${live ? ((liveBal != null ? Fmt.fmtNum(liveBal, 2) + " USDT" : "OKX…")) : `${Fmt.fmtNum(s.balance)} ХРЮ`}</span>
           ${bellBtn("btn-menu")}
           ${fsBtn("btn-menu")}
           <button class="btn-menu" data-action="menu:open" aria-label="Меню">${h.icon("menu", 18)}</button>
@@ -327,7 +330,12 @@ const App = (() => {
     };
     set("sb-balance", `${Fmt.fmtNum(s.balance)} ХРЮ`);
     set("sb-usd", `≈ ${Fmt.fmtUsd(s.balance)} · курс 1 ХРЮ = $1`);
-    set("mh-balance", `${Fmt.fmtNum(s.balance)} ХРЮ`);
+    // R52: в реальном режиме мобильный чип показывает РЕАЛЬНЫЙ баланс OKX в USDT
+    const srvBal = s.okx && Number.isFinite(s.okx.balanceUSDT) ? s.okx.balanceUSDT : null;
+    const liveBal = srvBal != null ? srvBal : (window.Live ? Live.balanceUSDT() : null);
+    set("mh-balance", s.mode === "live"
+      ? (liveBal != null ? Fmt.fmtNum(liveBal, 2) + " USDT" : "OKX…")
+      : `${Fmt.fmtNum(s.balance)} ХРЮ`);
     set("sb-btc", `BTC $${Fmt.fmtPrice(btc)}`);
     set("dt-btc", `BTC $${Fmt.fmtPrice(btc)}`);
     const live = document.getElementById("sb-live");
@@ -437,6 +445,11 @@ const App = (() => {
   // подтверждает — открываем по свежим уровням, нет — честно объясняем.
   async function openIdeaFlow(idea) {
     const s = Store.state;
+    // R53: шорт-идеи не существуют нигде (демо повторяет реальный рынок 1:1, спот OKX)
+    if (idea.res && idea.res.verdict === "шорт") {
+      h.toast("error", "Шортов больше нет", "демо и реальный рынок торгуют одинаково — только лонги, как на споте OKX: купил токен → продал");
+      return;
+    }
     const cur = (s.prices[idea.sym] && s.prices[idea.sym].price) || idea.res.price;
     const drift = Math.abs(cur - idea.res.price) / idea.res.price * 100;
     let useRes = idea.res;
@@ -468,11 +481,15 @@ const App = (() => {
     if (szSc.size <= 0) { h.toast("error", "Размер не проходит по лимитам", `${szSc.why} — поднимите лимиты или пополните счёт`); return; }
     const ideaOut = Store.placeDemo({ sym: idea.sym, side: useRes.verdict, size: szSc.size, lev: 1, stop: useRes.stop, target: useRes.target, strategy: "ai", ai: { confidence: useRes.confidence, note: useRes.note, factors: useRes.factors, score: useRes.score } });
     if (!ideaOut.ok) { h.toast("error", ideaOut.error); return; }
-    h.toast("success", `Идея ИИ взята: ${idea.sym} ${useRes.verdict}`, `${Fmt.fmtNum(szSc.size)} ХРЮ · уверенность ${useRes.confidence}%${useRes !== idea.res ? " · по свежему пересчёту" : ""}`);
+    h.toast("success", `Идея ИИ взята: ${idea.sym} ${useRes.verdict}`, s.mode === "live"
+      ? `${Fmt.fmtNum(szSc.size)} USDT · покупка на OKX идёт автоматически · уверенность ${useRes.confidence}%${useRes !== idea.res ? " · по свежему пересчёту" : ""}`
+      : `${Fmt.fmtNum(szSc.size)} ХРЮ · уверенность ${useRes.confidence}%${useRes !== idea.res ? " · по свежему пересчёту" : ""}`);
   }
 
   async function onAction(action, arg, ev) {
     const s = Store.state;
+    // R50: тема ntfy читается из поля ввода каждый раз — пользователь может вписать свою
+    const ntfyTopicOf = () => { const el = document.getElementById("ntfy-topic"); return el ? el.value.trim() : ""; };
     switch (action) {
       case "nav": navigate(arg); break;
       case "menu:open": moreOpen = true; document.getElementById("root").innerHTML = shellHtml(); renderView(); break;
@@ -573,6 +590,54 @@ const App = (() => {
         break;
       }
 
+      // ================= R51: ПОЛНАЯ СИНХРОНИЗАЦИЯ OKX =================
+      case "okx:connect": {
+        const key = (document.getElementById("okx-key") || {}).value || "";
+        const secret = (document.getElementById("okx-secret") || {}).value || "";
+        const pass = (document.getElementById("okx-pass") || {}).value || "";
+        if (!key.trim() || !secret.trim() || !pass.trim()) { h.toast("error", "Заполните все три поля", "API-ключ, Secret и passphrase (OKX всегда требует passphrase)"); break; }
+        if (!window.Server || !Server.active()) { h.toast("error", "Нет сервера", "Войдите в аккаунт — ключи OKX хранятся на сервере XenoAI"); break; }
+        s._okxBusy = true;
+        h.showModal(ViewsTrade.liveModal(), { wide: true });
+        h.toast("info", "Проверяю ключи на OKX…", "Сервер запросит реальный баланс — пара секунд");
+        const res = await Server.okxCfg({ apiKey: key.trim(), secret: secret.trim(), pass: pass.trim(), on: true }, Store.applyServerArchive);
+        s._okxBusy = false;
+        if (!res || res.ok === false) {
+          h.toast("error", "OKX не принял ключи", (res && res.error) || "проверьте ключ/секрет/passphrase и права «Чтение»+«Торговля»");
+        } else {
+          h.toast("success", "OKX подключён — полная синхронизация активна", `Реальный баланс: ${res.usdt != null ? Fmt.fmtNum(Math.round(res.usdt * 100) / 100, 2) + " USDT" : "—"} · входы теперь покупают токен на бирже, закрытия продают`);
+          if (s.mode !== "live" && confirm("Подключено. Переключиться в реальный режим сейчас?")) Store.setMode("live");
+        }
+        h.showModal(ViewsTrade.liveModal(), { wide: true });
+        renderView();
+        break;
+      }
+      case "okx:off": {
+        if (!confirm("Отключить OKX и стереть ключи с сервера? Открытые реальные ноги будут проданы при закрытии сделок только если ключи снова подключены.")) break;
+        const res = await Server.okxCfg({ on: false }, Store.applyServerArchive);
+        h.toast(res && res.ok !== false ? "info" : "error", res && res.ok !== false ? "OKX отключён, ключи стёрты с сервера" : "Не удалось отключить", (res && res.error) || "");
+        h.showModal(ViewsTrade.liveModal(), { wide: true });
+        renderView();
+        break;
+      }
+      case "okx:auto": {
+        const turnOn = !(s.okx && s.okx.auto);
+        Store.setOkxAuto(turnOn);
+        h.toast(turnOn ? "success" : "info", turnOn ? "Авто-ордера OKX включены" : "Авто-ордера OKX на паузе",
+          turnOn ? "входы покупают токен на OKX-споте, закрытия продают — всё автоматически" : "новые реальные ордера не открываются; уже открытые ноги продаются при закрытии");
+        h.showModal(ViewsTrade.liveModal(), { wide: true });
+        break;
+      }
+      case "okx:refresh": {
+        if (!window.Server || !Server.active()) break;
+        h.toast("info", "Обновляю баланс OKX…");
+        const res = await Server.action("okxSync", {}, Store.applyServerArchive);
+        h.toast(res && res.ok !== false ? "success" : "error", res && res.ok !== false ? "Баланс OKX обновлён" : "Сервер не ответил", (res && res.error) || "");
+        h.showModal(ViewsTrade.liveModal(), { wide: true });
+        renderView();
+        break;
+      }
+
       // реальный ордер (спот, маркет)
       case "live:order": {
         if (!window.Live || !Live.isConnected()) { h.toast("error", "Нет подключения", "Подключите кошелёк или биржу"); break; }
@@ -588,7 +653,7 @@ const App = (() => {
           const inst2 = DataLib.BY_SYM[f2.sym];
           const ordPair = inst2 ? (inst2.pair || (f2.sym + "USDT")) : (f2.sym + "USDT");
           const ord = await Live.placeOrder({ sym: ordPair, side: f2.side, amountUSDT: amt, price: price2 });
-          Store.recordLiveOrder({ sym: ord.sym, side: ord.side, amountUSDT: ord.amountUSDT, exchange: ord.exchange }, "маркет");
+          Store.recordLiveOrder({ sym: ord.sym, side: ord.side, amountUSDT: ord.amountUSDT, exchange: ord.exchange, price: ord.price }, "маркет");
           h.toast("success", `Ордер отправлен: ${ord.sym} ${ord.side === "лонг" ? "BUY" : "SELL"}`, `${Fmt.fmtNum(amt)} USDT · ${ord.exchange}`);
         } catch (e) {
           h.toast("error", "Биржа не приняла ордер", e.message || String(e));
@@ -628,9 +693,11 @@ const App = (() => {
         break;
       }
       case "ai:open": {
-        if (s.mode === "live") { h.toast("info", "Реальный режим", "Используйте кнопку «Отправить рыночный ордер» под вердиктом ИИ"); break; }
+        // R52: в live кнопка ведёт к РЕАЛЬНОЙ покупке на OKX (полная синхронизация)
         if (!s._ai || s._ai.res.verdict === "wait") { h.toast("error", "Сначала запустите ИИ-анализ", "Кнопка «Проанализировать» в форме сделки"); break; }
         const r = s._ai.res;
+        // R53: шортов нет нигде (демо = реальный рынок 1:1, спот OKX)
+        if (r.verdict === "шорт") { h.toast("error", "Шортов больше нет", "демо и реальный рынок торгуют одинаково — только лонги, как на споте OKX: купил токен → продал"); break; }
         if (Date.now() - s._ai.ts > 240000) { h.toast("info", "Расчёт устарел", "Пересчитайте вердикт ИИ"); break; }
         // не догонять поезд: цена ушла от расчёта больше чем на 60% риска — пересчитать
         const curPx = (s.prices[r.sym] && s.prices[r.sym].price) || r.price;
@@ -640,7 +707,10 @@ const App = (() => {
         if (sc.size <= 0) { h.toast("error", "Размер не проходит по лимитам", `${sc.why} — поднимите лимиты в настройках ИИ или пополните счёт`); break; }
         const out = Store.placeDemo({ sym: r.sym, side: r.verdict, size: sc.size, lev: 1, stop: r.stop, target: r.target, strategy: "ai", ai: { confidence: r.confidence, note: r.note, factors: r.factors, score: r.score } });
         if (!out.ok) { h.toast("error", out.error); break; }
-        h.toast("success", `ИИ-сделка открыта: ${r.sym} ${r.verdict}`, `${Fmt.fmtNum(sc.size)} ХРЮ · уверенность ${r.confidence}% · списано со счёта`);
+        h.toast("success", s.mode === "live" ? `Покупка на OKX пошла: ${r.sym} лонг` : `ИИ-сделка открыта: ${r.sym} ${r.verdict}`,
+          s.mode === "live"
+            ? `${Fmt.fmtNum(sc.size)} USDT · уверенность ${r.confidence}% · токен придёт на биржу автоматически`
+            : `${Fmt.fmtNum(sc.size)} ХРЮ · уверенность ${r.confidence}% · списано со счёта`);
         break;
       }
 
@@ -649,7 +719,7 @@ const App = (() => {
         // в реальном режиме автопилот по умолчанию ВЫКЛ; включение — только явным
         // подтверждением риска (требование безопасности реального рынка)
         if (s.mode === "live" && !s.aiAutoLive) {
-          const sure = confirm("Включить автопилот в РЕАЛЬНОМ режиме?\n\nИИ будет самостоятельно открывать и закрывать сделки-симуляции на реальных ценах (входы списывают виртуальные ХРЮ, реальные ордера по-прежнему отправляются только вручную). Авто-стоп сессии защитит лимитом ±" + (s.aiThreshold || 50) + "%.\n\nПродолжить?");
+          const sure = confirm("Включить автопилот в РЕАЛЬНОМ режиме?\n\nПри активной синхронизации OKX каждый вход ИИ = РЕАЛЬНАЯ покупка токена на споте (USDT с биржи), каждое закрытие = РЕАЛЬНАЯ продажа обратно. Только лонги — шорты на споте невозможны. Авто-стоп сессии защитит лимитом ±" + (s.aiThreshold || 50) + "% от реальных средств.\n\nПродолжить?");
           if (!sure) break;
         }
         Store.toggleAiAuto();
@@ -745,12 +815,25 @@ const App = (() => {
           h.toast("error", "Сигнал уже не актуален", sigRow ? `сигналу ${Math.round(sigAgeMs / 60000)} мин — рынок уехал, возьмите свежий из списка` : "стратегии обновили список — берите сигнал из актуальных во вкладке «Сигналы»");
           break;
         }
-        // размер сигнала — 500 ХРЮ, но не выше лимитов счёта (одна сделка / суммарный)
-        const sigSize = Math.min(500, Store.aiDealCap(), Math.round(Store.aiTotalRemain()), Math.round(s.balance));
-        if (sigSize < 10) { h.toast("error", "Сделка не влезает в лимиты", Store.aiTotalRemain() < 10 ? "суммарный лимит исчерпан — закройте часть сделок" : s.balance < 10 ? "пополните демо-счёт в кабинете" : `лимит одной сделки — ${Fmt.fmtNum(Store.aiDealCap())} ХРЮ`); break; }
+        // размер сигнала — 500 (ХРЮ в демо / USDT на реальном рынке), но не выше лимитов счёта
+        // R52: на реальном рынке база — свободные USDT с OKX (серверная синхронизация)
+        const liveMode = s.mode === "live";
+        const okxBal = s.okx && Number.isFinite(s.okx.balanceUSDT) ? s.okx.balanceUSDT : null;
+        const sigBase = liveMode ? (okxBal != null ? okxBal : 0) : s.balance;
+        const sigSize = Math.min(500, Store.aiDealCap(), Math.round(Store.aiTotalRemain()), Math.round(sigBase));
+        if (sigSize < 10) {
+          h.toast("error", "Сделка не влезает в лимиты",
+            liveMode
+              ? (okxBal == null ? "баланс OKX ещё не синхронизирован — подождите минуту" : Store.aiTotalRemain() < 10 ? "суммарный лимит исчерпан — закройте часть сделок" : `свободных USDT на бирже меньше 10 — доступно ${Fmt.fmtNum(okxBal, 2)}`)
+              : Store.aiTotalRemain() < 10 ? "суммарный лимит исчерпан — закройте часть сделок" : s.balance < 10 ? "пополните демо-счёт в кабинете" : `лимит одной сделки — ${Fmt.fmtNum(Store.aiDealCap())} ХРЮ`);
+          break;
+        }
         const sigOut = Store.placeDemo({ sym, side: "лонг", size: sigSize, lev: 1 });
         if (!sigOut.ok) { h.toast("error", sigOut.error); break; }
-        h.toast("success", `Сигнал взят в демо: ${sym}`, `${Fmt.fmtNum(sigSize)} ХРЮ списаны со счёта · цена ${Fmt.fmtPrice((s.prices[sym] && s.prices[sym].price) || 0)}`);
+        h.toast("success", liveMode ? `Сигнал взят: ${sym} · покупка на OKX` : `Сигнал взят в демо: ${sym}`,
+          liveMode
+            ? `${Fmt.fmtNum(sigSize)} USDT · покупка ${sym} идёт автоматически · цена ${Fmt.fmtPrice((s.prices[sym] && s.prices[sym].price) || 0)}`
+            : `${Fmt.fmtNum(sigSize)} ХРЮ списаны со счёта · цена ${Fmt.fmtPrice((s.prices[sym] && s.prices[sym].price) || 0)}`);
         break;
       }
 
@@ -964,10 +1047,74 @@ const App = (() => {
         try {
           const r = await Server.action("pushDrop", { tail: tailArg });
           if (r && r.ok) {
-            if (window.Store) { Store.state.pushSubs = (Store.state.pushSubs || []).filter((s) => String(s.endpoint || "").slice(-tailArg.length) !== tailArg); }
+            if (window.Store) { Store.state.pushSubs = (Store.state.pushSubs || []).filter((s2) => String(s2.endpoint || "").slice(-tailArg.length) !== tailArg); }
             h.toast("success", "Подписка удалена", "Сервер больше не будет слать пуши на мёртвый endpoint");
           } else h.toast("error", "Не удалось удалить", (r && r.error) || "сервер недоступен");
         } catch (e) { h.toast("error", "Не удалось удалить", String((e && e.message) || e)); }
+        refreshNotifyModal();
+        break;
+      }
+
+      // ---------- R50: резервный канал ntfy ----------
+      case "notify:ntfy-gen": {
+        if (!window.Store) break;
+        const el = document.getElementById("ntfy-topic");
+        if (el) el.value = Store.generateNtfyTopic();
+        h.toast("info", "Тема сгенерирована", "Скопируйте её и подпишитесь на неё в приложении ntfy — кто знает тему, тот получает события");
+        break;
+      }
+      case "notify:ntfy-copy": {
+        const t = ntfyTopicOf();
+        if (!t) { h.toast("error", "Тема пуста", "Сначала нажмите «Новая тема» или впишите свою"); break; }
+        try {
+          await navigator.clipboard.writeText(t);
+          h.toast("success", "Тема скопирована", t + " — вставьте её в приложении ntfy (кнопка «+» → подписаться)");
+        } catch (e) {
+          h.toast("info", "Тема ntfy", "Скопируйте вручную: " + t);
+        }
+        break;
+      }
+      case "notify:ntfy-on": {
+        if (!window.Store) break;
+        const t = ntfyTopicOf();
+        const r = Store.setNtfy(true, t);
+        if (!r.ok) { h.toast("error", "Канал не включён", r.error || "проверьте тему"); break; }
+        if (!window.Server || !Server.active()) {
+          h.toast("info", "Канал включён локально", "Сервер не активен — включение уедет в аккаунт при подключении");
+        } else {
+          h.toast("success", "Резервный канал включен", "События сделок поедут в ntfy даже при полностью закрытом браузере. Теперь нажмите «Проверка ntfy»");
+        }
+        refreshNotifyModal();
+        break;
+      }
+      case "notify:ntfy-off": {
+        if (!window.Store) break;
+        const t = ntfyTopicOf();
+        const r = Store.setNtfy(false, t);
+        if (!r.ok) { h.toast("error", "Не получилось", r.error || "проверьте тему"); break; }
+        h.toast("info", "Резервный канал выключен", "Сообщения в ntfy больше не отправляются");
+        refreshNotifyModal();
+        break;
+      }
+      case "notify:ntfy-test": {
+        if (!window.Server || !Server.active()) {
+          h.toast("error", "Сервер не активен", "Тестовое сообщение отправляет сервер — дождитесь подключения к бэкенду");
+          break;
+        }
+        const out2 = document.getElementById("ntfy-test-result");
+        if (out2) out2.innerHTML = '<span class="np-warn">отправляю…</span>';
+        const tr2 = await Server.ntfyTest(Store.applyServerArchive);
+        if (!tr2 || tr2.ok !== true) {
+          if (out2) out2.innerHTML = "";
+          h.toast("error", "Проверка не удалась", (tr2 && tr2.error) || "сервер недоступен");
+          break;
+        }
+        if (out2) out2.innerHTML = `<span class="${tr2.sent ? "np-ok" : "np-warn"} num">ntfy.sh: HTTP ${tr2.status || "—"}</span>`;
+        if (tr2.sent) {
+          h.toast("success", "Сообщение ушло в ntfy", "Если в приложении ntfy пусто — проверьте, что тема в приложении совпадает с темой здесь");
+        } else {
+          h.toast("error", "ntfy.sh не принял сообщение", tr2.err || ("HTTP " + (tr2.status || "?")));
+        }
         refreshNotifyModal();
         break;
       }
@@ -1073,6 +1220,40 @@ const App = (() => {
         });
         break;
       }
+      // ---------- R49: GLM на сервере (13-й фактор 24/7) ----------
+      case "glm:server": {
+        if (!(window.Server && Server.active())) { h.toast("error", "Сервер недоступен", "включите серверный режим в «Кабинете»"); break; }
+        const keyEl3 = document.getElementById("glm-key");
+        const modEl3 = document.getElementById("glm-model");
+        const cfg3 = GLM.getSettings();
+        const payload = {
+          endpoint: cfg3.endpoint,
+          model: (modEl3 && modEl3.value.trim()) || cfg3.model,
+          apiKey: (keyEl3 && keyEl3.value.trim()) || cfg3.apiKey,
+          on: true,
+        };
+        if (keyEl3 && keyEl3.value.trim()) GLM.save({ apiKey: keyEl3.value, model: payload.model }); // ключ остаётся и в браузере
+        h.toast("info", "Включаю GLM на сервере…", "сервер спрашивает модель — до 15 секунд");
+        Server.glmCfg(payload, Store.applyServerArchive).then((res) => {
+          if (!res || !res.ok) h.toast("error", "Сервер отказал", (res && res.error) || "");
+          else if (res.warning) h.toast("error", "GLM на сервере: модель ответила ошибкой", res.warning);
+          else if (res.verdict && res.verdict.status === "ok") h.toast("success", `GLM на сервере: ${res.verdict.bias === "flat" ? "вне рынка" : res.verdict.bias} ${res.verdict.confidence}%`, res.verdict.reasoning || "теперь это 13-й фактор 24/7");
+          else h.toast("success", "GLM включён на сервере", "вердикт будет обновляться каждые 10 минут");
+          h.showModal(ViewsTrade.glmModal(), {});
+          renderView();
+        });
+        break;
+      }
+      case "glm:serveroff": {
+        if (!(window.Server && Server.active())) { h.toast("error", "Сервер недоступен"); break; }
+        Server.glmCfg({ on: false }, Store.applyServerArchive).then((res) => {
+          if (!res || !res.ok) h.toast("error", "Сервер отказал", (res && res.error) || "");
+          else h.toast("info", "GLM на сервере выключен", "12 рыночных факторов работают как раньше");
+          h.showModal(ViewsTrade.glmModal(), {});
+          renderView();
+        });
+        break;
+      }
 
       // авторизация
       case "auth:tab": Auth.setTab(arg); renderAuth(); break;
@@ -1120,7 +1301,7 @@ const App = (() => {
         if (btn) {
           const f = Store.state._form;
           const sizeNum = Number(String(f.size).replace(",", ".")) || 0;
-          btn.innerHTML = `${f.side === "лонг" ? "Открыть лонг" : "Открыть шорт"} · ${sizeNum ? Fmt.fmtNum(sizeNum) : "0"} ХРЮ`;
+          btn.innerHTML = `Открыть лонг · ${sizeNum ? Fmt.fmtNum(sizeNum) : "0"} ХРЮ`; // R53: шортов нет — только лонг
         }
       } else if (el.getAttribute && el.getAttribute("data-role") === "cab-balance") {
         const clean = el.value.replace(/[^\d.,\s]/g, "");
