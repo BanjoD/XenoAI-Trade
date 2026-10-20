@@ -20,7 +20,7 @@ const TEXTDB_BASE = "https://textdb.online/";
 const TICK_MS = 2 * 60000;       // тик ИИ каждые 2 минуты
 const NEWS_MS = 10 * 60000;      // новостная лента раз в 10 минут
 const SCAN_PER_TICK = 8;         // монет в скане за тик (ротация по кругу ≈ каждые 6-7 мин на монету)
-export const BUILD = "r43";
+export const BUILD = "r46";
 
 const PASSWORDS = { david: "ETH123aAgo", yura: "BTCmyB671" };
 
@@ -219,13 +219,22 @@ export class Room {
       }
       if (path === "/bootstrap" && req.method === "POST") {
         // одноразовый перенос локального архива устройства (первый вход на сервер):
-        // union без потерь, после этого сервер авторитарен
+        // union без потерь, после этого сервер авторитарен.
+        // R44: защита от повторных слияний — клиент шлёт bootstrap при КАЖДОМ холодном
+        // старте (флаг только в памяти страницы). Повторное слияние устаревшего архива
+        // дрейфует баланс (pnl сделок «открылась и закрылась в промежутке» теряется).
+        // Поэтому первое успешное слияние ставит clientMergedAt (персистится в стейте),
+        // и все последующие вызовы возвращают текущее состояние без изменений.
         const body = await req.json();
         await this.loadState(login);
+        if (this.state.clientMergedAt) {
+          return json({ ok: true, archive: this.state, skipped: true, mergedAt: this.state.clientMergedAt });
+        }
         if (body.archive && validArchive(body.archive)) {
           const merged = mergeArchives(this.state, body.archive);
           merged.login = this.state.login;
           merged.host = { id: "server", tag: "Сервер XenoAI", until: 9e15 };
+          merged.clientMergedAt = Date.now(); // R44: сервер авторитарен с этого момента
           this.state = merged;
           this.brainObj = null; // пересобрать рантайм на новом архиве
           this.state.updatedAt = Date.now();
@@ -317,7 +326,8 @@ export class Room {
     const subs = ((this.state && this.state.pushSubs) || []).filter((s) => s && s.endpoint && s.keys);
     if (!subs.length || !events.length) return { sent: 0, dead: 0 };
     // потолок: 2 события за вызов (лимит исходящих запросов), самые свежие
-    const list = events.filter((e) => e && e.notify && e.notify.kind).slice(0, 2);
+    // R46: потолок поднят 2 → 4 события за вызов (было 2 — при нескольких сделках в тик часть уведомлений терялась)
+    const list = events.filter((e) => e && e.notify && e.notify.kind).slice(0, 4);
     if (!list.length) return { sent: 0, dead: 0 };
     const deadEndpoints = [];
     let sent = 0;
@@ -328,8 +338,14 @@ export class Room {
         tag: ev.tone === "bear" ? "xenoai-bear" : "xenoai",
         url: "./",
       };
+      // R46 — КЛЮЧЕВОЙ ФИКС «пуши не приходят при закрытом приложении (Android)»:
+      // торговые события шли с Urgency: normal — FCM/Chrome откладывает такие пуши,
+      // пока устройство спит в Doze (приложение закрыто, экран погашен) — они застревали
+      // и с TTL 2 ч сгорали. Тестовый пуш (pushTest) шёл с high — потому «тест доходит,
+      // реальные нет». Теперь ВСЕ торговые события — high (будят устройство немедленно),
+      // TTL 12 ч (переживает ночной Doze). Уровень событий высокий — сигнал важен сейчас.
       for (const sub of subs) {
-        const r = await sendPush(sub, payload, { urgency: ev.tone === "bear" ? "high" : "normal", ttl: 7200, timeoutMs: 8000 });
+        const r = await sendPush(sub, payload, { urgency: "high", ttl: 43200, timeoutMs: 8000 });
         // R42: запоминаем результат последней доставки — виден в модалке уведомлений
         sub.last = { ts: Date.now(), status: r.status || 0, ok: Boolean(r.ok) };
         if (r.ok) sent++;

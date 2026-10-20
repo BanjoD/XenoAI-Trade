@@ -371,8 +371,9 @@ const Store = (() => {
         } : null,
       })),
       // aiBrain здесь нет: память ИИ глобальная (GLOBAL_BRAIN_KEY + облако), одна на всех
-      // R43: теневая торговля — журнал отказов и статистика едут с архивом
-      shadow: s.shadow && Array.isArray(s.shadow.list) ? { list: s.shadow.list.slice(0, 60), stats: s.shadow.stats || {} } : { list: [], stats: {} },
+      // R43: теневая торговля — журнал отказов и статистика едут с архивом; R44: + история подстроек порога
+      // R45: + trust/skip — доверие по монетам из исходов отказов и пропуски скана
+      shadow: s.shadow && Array.isArray(s.shadow.list) ? { list: s.shadow.list.slice(0, 60), stats: s.shadow.stats || {}, tune: Array.isArray(s.shadow.tune) ? s.shadow.tune.slice(0, 10) : [], trust: s.shadow.trust && typeof s.shadow.trust === "object" ? s.shadow.trust : {}, skip: s.shadow.skip && typeof s.shadow.skip === "object" ? s.shadow.skip : {} } : { list: [], stats: {}, tune: [], trust: {}, skip: {} },
     };
   }
 
@@ -468,11 +469,15 @@ const Store = (() => {
       state.aiIdeas = d.aiIdeas.filter((i) => i && i.sym && i.res && typeof i.res.verdict === "string" && typeof i.res.confidence === "number")
         .slice(0, 8);
     }
-    // R43: теневая торговля (журнал отказов ИИ) — с валидацией структуры
+    // R43: теневая торговля (журнал отказов ИИ) — с валидацией структуры; R44: + tune
     if (d.shadow && Array.isArray(d.shadow.list)) {
       state.shadow = {
         list: d.shadow.list.filter((e) => e && typeof e.id === "string" && e.sym && (e.side === "лонг" || e.side === "шорт") && typeof e.price === "number").slice(0, 60),
         stats: d.shadow.stats && typeof d.shadow.stats === "object" ? d.shadow.stats : {},
+        tune: Array.isArray(d.shadow.tune) ? d.shadow.tune.filter((t) => t && typeof t.ts === "number" && Number.isFinite(Number(t.from)) && Number.isFinite(Number(t.to))).slice(0, 10) : [],
+        // R45: доверие по монетам + пропуски скана (сервер считает, клиент хранит/показывает)
+        trust: d.shadow.trust && typeof d.shadow.trust === "object" && !Array.isArray(d.shadow.trust) ? d.shadow.trust : {},
+        skip: d.shadow.skip && typeof d.shadow.skip === "object" && !Array.isArray(d.shadow.skip) ? d.shadow.skip : {},
       };
     }
     if (typeof d.rev === "number" && d.rev > (state.rev || 0)) state.rev = d.rev;
@@ -737,7 +742,36 @@ const Store = (() => {
       for (const k of ["right", "wrong", "flat", "avoidedSum", "avoidedN"]) stats[k] = Math.max(Number(stA[k]) || 0, Number(stB[k]) || 0);
       const sA = Number(stA.since) || 9e15, sB = Number(stB.since) || 9e15;
       stats.since = Math.min(sA, sB) >= 9e15 ? Date.now() : Math.min(sA, sB);
-      out.shadow = { list: Array.from(byId.values()).sort((x, y) => (y.ts || 0) - (x.ts || 0)).slice(0, 60), stats };
+      // R44: история подстроек порога — union по ts, свежие сверху
+      const tuneById = new Map();
+      for (const t of [...((b.shadow && b.shadow.tune) || []), ...((a.shadow && a.shadow.tune) || [])]) {
+        if (t && typeof t.ts === "number" && !tuneById.has(t.ts)) tuneById.set(t.ts, t);
+      }
+      const tune = Array.from(tuneById.values()).sort((x, y) => (y.ts || 0) - (x.ts || 0)).slice(0, 10);
+      // R45: доверие по монетам — union по sym; счётчики монотонные → по максимуму,
+      // adj/ts — от более свежей записи; пропуски скана — позднейший until
+      const trA = (a.shadow && a.shadow.trust) || {}, trB = (b.shadow && b.shadow.trust) || {};
+      const trustOut = {};
+      for (const sym of new Set([...Object.keys(trA), ...Object.keys(trB)])) {
+        const ta = trA[sym] || null, tb = trB[sym] || null;
+        if (!ta) { trustOut[sym] = tb; continue; }
+        if (!tb) { trustOut[sym] = ta; continue; }
+        const newer = (tb.ts || 0) >= (ta.ts || 0) ? tb : ta;
+        trustOut[sym] = {
+          right: Math.max(Number(ta.right) || 0, Number(tb.right) || 0),
+          wrong: Math.max(Number(ta.wrong) || 0, Number(tb.wrong) || 0),
+          flat: Math.max(Number(ta.flat) || 0, Number(tb.flat) || 0),
+          adj: Number(newer.adj) || 0,
+          ts: Math.max(Number(ta.ts) || 0, Number(tb.ts) || 0),
+        };
+      }
+      const skA = (a.shadow && a.shadow.skip) || {}, skB = (b.shadow && b.shadow.skip) || {};
+      const skipOut = {};
+      for (const sym of new Set([...Object.keys(skA), ...Object.keys(skB)])) {
+        const until = Math.max(Number(skA[sym]) || 0, Number(skB[sym]) || 0);
+        if (until > Date.now()) skipOut[sym] = until; // истёкшие пропуски не resurrect
+      }
+      out.shadow = { list: Array.from(byId.values()).sort((x, y) => (y.ts || 0) - (x.ts || 0)).slice(0, 60), stats, tune, trust: trustOut, skip: skipOut };
     }
 
     // R31: аренда исполнителя — действует аренда с БОЛЕЕ ПОЗДНИМ сроком (кто последний
@@ -1366,18 +1400,29 @@ const Store = (() => {
 
   function getBars(sym, tf) { return state.bars[`${sym}:${tf}`] || []; }
 
+  // R45: параллельные докачки одной и той же пары складываем в один запрос
+  const barsInflight = {};
+
+  // R45: ensureBars теперь ВОЗВРАЩАЕТ ПРОМИС: true — живые свечи лежат в кэше,
+  // false — биржа не ответила (в кэше честно помеченная синтетика). Клик по идее
+  // дожидается промиса сам и продолжает вход — больше не нужно «нажмите ещё раз».
+  // Свечи из синтетики триггерят повторную докачку (раньше закэшированная синтетика
+  // оставалась навсегда и ломала свежий пересчёт идеи).
   function ensureBars(sym, tf) {
     const key = `${sym}:${tf}`;
-    if (state.bars[key]) return;
+    const have = state.bars[key];
+    if (have && have.length && !(have[have.length - 1] && have[have.length - 1].sim)) return Promise.resolve(true);
+    if (barsInflight[key]) return barsInflight[key];
     const inst = BY_SYM[sym];
-    if (!inst) return;
+    if (!inst) return Promise.resolve(false);
     const interval = (TF_MAP[tf] && TF_MAP[tf].binance) || "15m";
-    Binance.fetchKlines(inst.pair, interval, 120)
+    barsInflight[key] = Binance.fetchKlines(inst.pair, interval, 120)
       .then((rows) => {
         state.bars[key] = klineToBars(rows);
         state.degraded = false;
         state.lastSync = Date.now();
         emit();
+        return true;
       })
       .catch(() => {
         // R30: биржа не ответила — для ГРАФИКА рисуем честно помеченные синтетические
@@ -1385,7 +1430,17 @@ const Store = (() => {
         const p = (state.prices[sym] && state.prices[sym].price) || DEFAULT_PRICES[sym] || 1;
         state.bars[key] = genSimBars(sym, p);
         emit();
-      });
+        return false;
+      })
+      .then((res) => { delete barsInflight[key]; return res; });
+    return barsInflight[key];
+  }
+
+  // R45: прогрев 15м-свечей для идей/сигналов — к моменту клика «Открыть в демо»
+  // данные уже в кэше, вход происходит мгновенно и без ошибок
+  function prewarmSignalBars() {
+    for (const i of (state.aiIdeas || []).slice(0, 6)) ensureBars(i.sym, "15м");
+    for (const g of (state.signals || []).slice(0, 8)) ensureBars(g.sym, "15м");
   }
 
   // R32: в серверном режиме каждое действие исполняется СЕРВЕРОМ (локально та же
@@ -2761,7 +2816,7 @@ const Store = (() => {
   }
 
   return {
-    state, subscribe, emit, onFastTick, onNotify, start, getBars, ensureBars,
+    state, subscribe, emit, onFastTick, onNotify, start, getBars, ensureBars, prewarmSignalBars,
     placeDemo, closeDemo, setBalance, resetDemo, toggleAuto,
     loadWhales, setActiveSym, totalEquity, switchUser, canTrade,
     setMode, toggleAiAuto, recordLiveOrder, aiSessionInfo,

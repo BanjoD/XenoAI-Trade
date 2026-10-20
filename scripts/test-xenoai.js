@@ -445,10 +445,10 @@ section("Исходники: контроль ключевых констант"
   ok(/торговля стоит · цены заморожены/.test(viewsSrc), "честная плашка деградации в сделках");
 
   const swSrc = fs.readFileSync(path.join(REPO, "sw.js"), "utf8");
-  ok(/VERSION = "xenoai-v15"/.test(swSrc), "SW поднят до v15");
+  ok(/VERSION = "xenoai-v20"/.test(swSrc), "SW поднят до v20");
   ok(/SKIP_WAITING/.test(swSrc), "R32: SKIP_WAITING — новая версия SW применяется сразу");
   const idx = fs.readFileSync(path.join(REPO, "index.html"), "utf8");
-  ok(idx.indexOf("v=20261036") !== -1, "кэш-версии ?v=20261036");
+  ok(idx.indexOf("v=20261041") !== -1, "кэш-версии ?v=20261041");
   ok(idx.indexOf("js/backend.js") !== -1 && idx.indexOf("js/backend-config.js") !== -1, "R32: серверный клиент подключён в index.html");
   const yml = fs.readFileSync(path.join(REPO, ".github", "workflows", "guardian.yml"), "utf8");
   ok(yml.indexOf("npm install") === -1, "Стражу не нужны npm-зависимости (чистый Node crypto)");

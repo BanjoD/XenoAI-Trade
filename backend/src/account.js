@@ -28,6 +28,8 @@ export function defaultBrain() {
     trades: 0, wins: 0, losses: 0,
     lessons: [],
     wFlags: {},
+    shadowWrong: 0,  // R44: сколько отказов «по порогу» тень признала ошибочными (обратная связь)
+    shadowTuneAt: 0, // R44: троттл подстройки порога по тени — не чаще раза в час
     updatedAt: 0,
   };
 }
@@ -45,6 +47,8 @@ export function normalizeBrain(b) {
   if (!Number.isFinite(br.losses) || br.losses < 0) br.losses = 0;
   if (!Number.isFinite(br.confThreshold)) br.confThreshold = 74;
   br.confThreshold = Math.max(70, Math.min(80, Math.round(br.confThreshold)));
+  if (!Number.isFinite(br.shadowWrong) || br.shadowWrong < 0) br.shadowWrong = 0;
+  if (!Number.isFinite(br.shadowTuneAt) || br.shadowTuneAt < 0) br.shadowTuneAt = 0;
   return br;
 }
 
@@ -89,8 +93,10 @@ export function mergeArchives(a, b) {
       if (!c || !c.id) return;
       const pid = pidOfClosed(c);
       if (!pid) return;
+      // R44: при коллизии pid оставляем запись с ПОЗДНИМ closedAt — сервер авторитарен,
+      // его закрытие правдивее устаревшей копии устройства
       const cur = byPid.get(pid);
-      if (!cur || (c.closedAt || 0) < (cur.closedAt || 0)) byPid.set(pid, c);
+      if (!cur || (c.closedAt || 0) > (cur.closedAt || 0)) byPid.set(pid, c);
     };
     (listA || []).forEach(add);
     (listB || []).forEach(add);
@@ -175,12 +181,35 @@ const SHADOW_DEADZONE = 1.0;                 // |движение| < 1% за г�
 // Медвежий режим (тот самый «фильтр, который зарубил почти всё»): BTC −3% за 24ч
 // или ≥70% вотчлиста в красе → порог входа +6 — в падении торгуем только отборное.
 const BEAR_GATE = { btc24h: -3, breadth: 0.7, bump: 6 };
+// R45: тень учит ПОДБОР МОНЕТ. Доверие к монете строится из исходов её отказов:
+// «wrong» — отказали, а монета ушла в плюс (фильтр был слишком строг для неё — упущенный профит),
+// «right» — отказали, и монета действительно рухнула (отказ верный).
+// adj — прибавка/скидка к уверенности при входе и вес в ранжировании идей.
+const TRUST_MIN_N = 2;     // минимум разобранных отказов по монете, прежде чем влиять
+const TRUST_W_WRONG = 1.5; // вес упущенного профита (важнее: это наша дыра в подборе)
+const TRUST_W_RIGHT = 1.0; // вес верного отказа
+const TRUST_MAX = 4;       // потолок бонуса уверенности, пунктов
+const TRUST_MIN = -6;      // дно штрафа уверенности, пунктов
+// Монета с СТАБИЛЬНО верными отказами (right ≥ 3 и right ≥ 3×wrong) — мусорка, где
+// ИИ каждый раз правильно не покупал: убираем её со скана на 12 часов.
+const SKIP_RIGHT_N = 3;
+const SKIP_RATIO = 3;
+const SKIP_MS = 12 * 3600e3;
 
 function defaultShadow() {
-  return { list: [], stats: { right: 0, wrong: 0, flat: 0, avoidedSum: 0, avoidedN: 0, since: Date.now() } };
+  return { list: [], stats: { right: 0, wrong: 0, flat: 0, avoidedSum: 0, avoidedN: 0, since: Date.now() }, trust: {}, skip: {} };
 }
 
-function normalizeShadow(s) {
+// R45: adj доверия из счётчиков исходов — единая формула для пересчёта и нормализации
+function trustAdjFrom(t) {
+  if (!t || typeof t !== "object") return 0;
+  const n = (Number(t.right) || 0) + (Number(t.wrong) || 0) + (Number(t.flat) || 0);
+  if (n < TRUST_MIN_N) return 0;
+  const raw = (Number(t.wrong) || 0) * TRUST_W_WRONG - (Number(t.right) || 0) * TRUST_W_RIGHT;
+  return Math.max(TRUST_MIN, Math.min(TRUST_MAX, Math.round(raw)));
+}
+
+export function normalizeShadow(s) {
   const out = defaultShadow();
   if (!s || typeof s !== "object") return out;
   if (s.stats && typeof s.stats === "object") {
@@ -201,6 +230,23 @@ function normalizeShadow(s) {
         maxPct: Number.isFinite(Number(e.maxPct)) ? Number(e.maxPct) : null,
         verdict: e.verdict === "right" || e.verdict === "wrong" || e.verdict === "flat" ? e.verdict : null,
       }));
+  }
+  // R45: доверие по монетам + действующие пропуски скана (истёкшие выбрасываем)
+  if (s.trust && typeof s.trust === "object") {
+    for (const k of Object.keys(s.trust)) {
+      const t = s.trust[k];
+      if (!t || typeof t !== "object") continue;
+      out.trust[String(k).slice(0, 12)] = {
+        right: Number(t.right) || 0, wrong: Number(t.wrong) || 0, flat: Number(t.flat) || 0,
+        adj: trustAdjFrom(t), ts: Number(t.ts) || 0,
+      };
+    }
+  }
+  if (s.skip && typeof s.skip === "object") {
+    for (const k of Object.keys(s.skip)) {
+      const until = Number(s.skip[k]);
+      if (Number.isFinite(until) && until > Date.now()) out.skip[String(k).slice(0, 12)] = until;
+    }
   }
   return out;
 }
@@ -457,7 +503,70 @@ export class AccountBrain {
         if (e.verdict === "right") { st.right = (st.right || 0) + 1; st.avoidedSum = (st.avoidedSum || 0) + Math.abs(hyp); st.avoidedN = (st.avoidedN || 0) + 1; }
         else if (e.verdict === "wrong") st.wrong = (st.wrong || 0) + 1;
         else st.flat = (st.flat || 0) + 1;
+        // R45: исход отказа копит ДОВЕРИЕ к монете — будущий подбор монет и решения по сигналам
+        try {
+          const tr = sh.trust = sh.trust || {};
+          const t = tr[e.sym] = tr[e.sym] || { right: 0, wrong: 0, flat: 0, adj: 0, ts: 0 };
+          t[e.verdict] = (t[e.verdict] || 0) + 1;
+          t.adj = trustAdjFrom(t);
+          t.ts = now;
+          this.shadowSkipMaybe(e.sym, sh);
+        } catch (x) { /* доверие не критично */ }
+        try { this.shadowLearn(e, sh); } catch (x) { /* обратная связь не критична */ }
       }
+    }
+  }
+
+  // R44: обратная связь «тень → ИИ». Отказ с кодом «порог», оказавшийся ОШИБОЧНЫМ
+  // (монета пошла бы в плюс), значит: фильтр был слишком строг для таких входов.
+  // Каждые 2 таких ошибки порог входа снижается на 1% (пол 72 — жёсткое дно по требованию
+  // «>74% открывается само», ниже базового 74 на два деления максимум). Правильные отказы
+  // порог НЕ поднимают: ужесточать торговлю по своей же статистике — путь к заморозке (кейс R40).
+  // Гварды остальных фильтров (ансамбль/скам/риск/нагрузка) тенью не трогаются — они структурные.
+  shadowLearn(e, sh) {
+    if (!e || e.verdict !== "wrong" || e.whyCode !== "порог") return;
+    const br = this.brain;
+    if (!br) return;
+    br.shadowWrong = (br.shadowWrong || 0) + 1;
+    const now = Date.now();
+    if (br.shadowWrong % 2 !== 0) return;               // каждые 2 ошибочных отказа
+    if (now - (br.shadowTuneAt || 0) < 3600e3) return;  // не чаще раза в час
+    const from = br.confThreshold || 74;
+    if (from <= 72) return;                             // пол — ниже не опускаем
+    br.shadowTuneAt = now;
+    br.confThreshold = from - 1;
+    this.pushLesson(`Тень: отказы по порогу оказались ошибочными (${br.shadowWrong} шт. суммарно, последний «+${e.hypPct}%» по ${e.sym}) — снизил порог входа до ${br.confThreshold}%`);
+    sh.tune = [{ ts: now, from, to: br.confThreshold, why: "ошибочные отказы по порогу" }, ...(sh.tune || [])].slice(0, 10);
+  }
+
+  // ================= R45: тень → доверие к монетам =================
+  // Прибавка/скидка к уверенности по монете: где фильтр ошибочно резал плюсовые
+  // входы — доверие подрастает (вход доступнее), где отказы стабильно верны — скидка.
+  shadowTrustAdj(sym) {
+    const sh = this.a.shadow;
+    const t = sh && sh.trust ? sh.trust[sym] : null;
+    return t ? (Number(t.adj) || 0) : 0;
+  }
+
+  shadowSkipActive(sym) {
+    const sh = this.a.shadow;
+    return Boolean(sh && sh.skip && sh.skip[sym] && sh.skip[sym] > Date.now());
+  }
+
+  // Монета, у которой отказы СТАБИЛЬНО верны (right ≥ 3 и right ≥ 3×wrong), — мусорка,
+  // где ИИ каждый раз правильно не покупал. Убираем её со скана на 12 часов: слоты
+  // «лучших идей» не занимают заведомо плохие монеты — подбор улучшается.
+  shadowSkipMaybe(sym, sh) {
+    const t = sh.trust && sh.trust[sym];
+    if (!t) return;
+    const now = Date.now();
+    if (sh.skip && sh.skip[sym] && sh.skip[sym] > now) return; // уже в тени
+    if ((Number(t.right) || 0) >= SKIP_RIGHT_N && (Number(t.right) || 0) >= SKIP_RATIO * (Number(t.wrong) || 0)) {
+      sh.skip = sh.skip || {};
+      sh.skip[sym] = now + SKIP_MS;
+      const n = (Number(t.right) || 0) + (Number(t.wrong) || 0) + (Number(t.flat) || 0);
+      this.a.aiIdeas = (this.a.aiIdeas || []).filter((i) => i.sym !== sym); // идея монеты снимается немедленно
+      this.pushLesson(`Тень: по ${sym} отказы стабильно верны (${t.right} из ${n} разобранных) — снял монету со скана ИИ на 12 ч`);
     }
   }
 
@@ -664,7 +773,11 @@ export class AccountBrain {
     if (margin > this.a.balance) return { ok: false, error: `Недостаточно хрювен: свободно ${Fmt.fmtNum(this.a.balance)} ХРЮ` };
     const risk = price * 0.02;
     const pos = {
-      id: p.id || `u${Date.now()}`, owner: "user", strategy: p.strategy || "manual", sym: p.sym, side: p.side,
+      // R44: id устойчив к коллизиям — два входа в одну миллисекунду (кнопка + автопилот,
+      // быстрый тап по двум идеям) не должны получать один id: дубль id при закрытии
+      // списывает маржу одной записью за обе позиции и ломает сходство баланса
+      id: p.id || `u${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+      owner: "user", strategy: p.strategy || "manual", sym: p.sym, side: p.side,
       size: margin, lev: p.lev || 1, entry: price,
       stop: p.stop || (p.side === "лонг" ? price - risk : price + risk),
       target: p.target || (p.side === "лонг" ? price + risk * 2 : price - risk * 2),
@@ -722,9 +835,13 @@ export class AccountBrain {
   }
 
   updateIdeas(sym, res, guard) {
-    const rest = this.a.aiIdeas.filter((i) => i.sym !== sym);
-    if (res.verdict !== "wait") rest.push({ sym, res, guard, ts: Date.now() });
-    rest.sort((x, y) => y.res.confidence - x.res.confidence);
+    // R45: монета «в тени» (отказы стабильно верны) — идею снимаем и не добавляем
+    let rest = this.a.aiIdeas.filter((i) => i.sym !== sym);
+    if (!this.shadowSkipActive(sym) && res.verdict !== "wait") rest.push({ sym, res, guard, ts: Date.now() });
+    // R45: ранжирование с тенью — доверие по монете (из исходов прошлых отказов)
+    // и симбиас реальных сделок двигают монету в «лучших идеях», мусор тонет
+    const rank = (i) => i.res.confidence + this.shadowTrustAdj(i.sym) + (this.symBias(i.sym) || 0);
+    rest.sort((x, y) => rank(y) - rank(x));
     this.a.aiIdeas = rest.slice(0, 8);
   }
 
@@ -787,7 +904,9 @@ export class AccountBrain {
     const aiPos = this.a.userPositions.find((p) => p.sym === sym && p.strategy === "ai");
     const aiCount = this.a.userPositions.filter((p) => p.strategy === "ai").length;
     const thr = this.brain.confThreshold || 74;
-    const effConf = res.confidence + this.symBias(sym);
+    // R45: доверие по тени — третий компонент эффективной уверенности (рядом с симбиасом)
+    const trustAdj = this.shadowTrustAdj(sym);
+    const effConf = res.confidence + this.symBias(sym) + trustAdj;
 
     if (aiPos && res.verdict !== "wait" && res.verdict !== aiPos.side) {
       const fg = this.flipAllowed(aiPos, res, effConf, thr, sym);
@@ -849,11 +968,14 @@ export class AccountBrain {
     const bump = this._bear ? BEAR_GATE.bump : 0;
     const thrEntry = thr + bump;
     if (!aiPos && res.verdict !== "wait") {
+      // R45: монета «в тени» — осознанный пропуск, а не отказ фильтра: в журнал
+      // отказов НЕ пишем (не засоряем статистику), идей и входов не даём
+      if (this.shadowSkipActive(sym)) return;
       const maxPos = this.effMaxPos();
       const hg = this.heatGuard();
       const sc = this.aiSizeCalc();
       let refuse = "";
-      if (effConf < thrEntry) refuse = `порог: уверенность ${effConf}% < ${thrEntry}%${bump ? " · медвежий режим +6" : ""}`;
+      if (effConf < thrEntry) refuse = `порог: уверенность ${effConf}% < ${thrEntry}%${bump ? " · медвежий режим +6" : ""}${trustAdj ? ` · тень ${trustAdj > 0 ? "+" : ""}${trustAdj}` : ""}`;
       else if (res.agreeShare != null && res.agreeShare < 0.55) refuse = `ансамбль: согласие факторов ${Math.round(res.agreeShare * 100)}% < 55%`;
       else if (aiCount >= maxPos) refuse = `лимит: позиций уже ${aiCount} из ${maxPos}`;
       else if (!guard.ok) refuse = `фильтр: ${guard.why}`;

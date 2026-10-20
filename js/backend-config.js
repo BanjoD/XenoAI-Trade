@@ -5,6 +5,6 @@
 "use strict";
 
 window.XENOAI_BACKEND = {
-  url: "https://xenoai-trade-backend.eldavidarz.workers.dev",
+  url: "",
   build: "r32",
 };

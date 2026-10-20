@@ -118,11 +118,14 @@ const Notify = (() => {
   function enable() {
     if (!supported()) return Promise.resolve({ ok: false, why: "Этот браузер не поддерживает системные уведомления (или сайт открыт как файл, а не по https/localhost)" });
     if (iosNeedsInstall()) return Promise.resolve({ ok: false, why: "На iPhone/iPad добавьте XenoAI Trade на экран «Домой» (Поделиться → «На экран Домой») и включите уведомления уже в установленном приложении — так требует iOS 16.4+" });
-    if (permission() === "denied") return Promise.resolve({ ok: false, why: "Разрешение заблокировано. Разрешите уведомления для этого сайта в настройках браузера (значок замка в адресной строке)" });
+    if (permission() === "denied") return Promise.resolve({ ok: false, why: "Разрешение заблокировано. На Android 13+ проверьте и системное разрешение: Настройки → Приложения → Chrome → Уведомления. Потом разрешите уведомления для сайта (значок замка в адресной строке) и включите заново" });
     const after = () => {
       settings.on = true; persist();
       show("Уведомления включены", "XenoAI Trade сообщит о сделках ИИ, профите и авто-стопе", { tag: "system:on" });
       // R30: подписка Web Push создаётся сразу — пуши от Стража придут и при закрытом приложении
+      // R46: сразу стартуем вечный цикл здоровья подписки — раньше он запускался только на
+      // холодном старте, и умершая после «Включить» подписка не лечилась до перезахода
+      pushHealthLoop();
       return ensureSubscription().then((pr) => ({ ok: true, push: pr }));
     };
     if (permission() === "granted") return Promise.resolve().then(after);

@@ -299,6 +299,9 @@ const App = (() => {
   function renderView() {
     const el = document.getElementById("view");
     if (!el) return;
+    // R45: на экране «Сигналы» заранее греем 15м-свечи идей и сигналов — к клику
+    // «Открыть в демо» данные уже в кэше, вход мгновенный и без «собираю свечи»
+    if (view === "signals") Store.prewarmSignalBars();
     let out;
     if (view === "market") out = ViewsTrade.market();
     else if (view === "trades") out = ViewsTrade.trades();
@@ -428,6 +431,46 @@ const App = (() => {
   }
 
   // ---------- обработка действий ----------
+  // R45: вход в идею одним касанием. Раньше при дрейфе цены и отсутствии живых
+  // свечей показывали «нажмите «Открыть в демо» ещё раз через пару секунд» — теперь
+  // докачку ждём сами (ensureBars возвращает промис) и продолжаем сценарий до конца:
+  // подтверждает — открываем по свежим уровням, нет — честно объясняем.
+  async function openIdeaFlow(idea) {
+    const s = Store.state;
+    const cur = (s.prices[idea.sym] && s.prices[idea.sym].price) || idea.res.price;
+    const drift = Math.abs(cur - idea.res.price) / idea.res.price * 100;
+    let useRes = idea.res;
+    if (drift > (idea.res.riskPct || 1) * 0.6) {
+      let bars = Store.getBars(idea.sym, "15м");
+      if (!bars || bars.length < 60 || (bars[bars.length - 1] && bars[bars.length - 1].sim)) {
+        h.toast("info", `Собираю свежие свечи ${idea.sym}…`, "пара секунд — вход выполню автоматически, второй раз нажимать не нужно");
+        const live = await Store.ensureBars(idea.sym, "15м");
+        bars = Store.getBars(idea.sym, "15м");
+        if (!live || !bars || bars.length < 60 || (bars[bars.length - 1] && bars[bars.length - 1].sim)) {
+          h.toast("error", `${idea.sym}: биржа не отдала живые свечи`, "торговать по синтетике запрещено — попробуйте ещё раз через минуту");
+          return;
+        }
+      }
+      const extra = {
+        whale: null,
+        onchain: (window.WhalesDB && WhalesDB.bias) ? WhalesDB.bias(idea.sym) : null,
+        glm: (window.GLM && GLM.factor) ? GLM.factor(idea.sym) : null,
+      };
+      const fresh = Engine.aiAnalyze(idea.sym, bars, s.aiBrain, (s.news && s.news.items) || [], extra);
+      const freshDrift = fresh && fresh.price ? Math.abs(cur - fresh.price) / fresh.price * 100 : Infinity;
+      if (!fresh || fresh.verdict === "wait" || freshDrift > (fresh.riskPct || 1) * 0.6) {
+        h.toast("info", "Цена ушла от расчёта", `${idea.sym}: идея строилась по ${Fmt.fmtPrice(idea.res.price)}, сейчас ${Fmt.fmtPrice(cur)} — свежий пересчёт вход не подтверждает, сканер обновит идею на закрытии 15м-свечи`);
+        return;
+      }
+      useRes = fresh;
+    }
+    const szSc = Store.aiSizeCalc();
+    if (szSc.size <= 0) { h.toast("error", "Размер не проходит по лимитам", `${szSc.why} — поднимите лимиты или пополните счёт`); return; }
+    const ideaOut = Store.placeDemo({ sym: idea.sym, side: useRes.verdict, size: szSc.size, lev: 1, stop: useRes.stop, target: useRes.target, strategy: "ai", ai: { confidence: useRes.confidence, note: useRes.note, factors: useRes.factors, score: useRes.score } });
+    if (!ideaOut.ok) { h.toast("error", ideaOut.error); return; }
+    h.toast("success", `Идея ИИ взята: ${idea.sym} ${useRes.verdict}`, `${Fmt.fmtNum(szSc.size)} ХРЮ · уверенность ${useRes.confidence}%${useRes !== idea.res ? " · по свежему пересчёту" : ""}`);
+  }
+
   async function onAction(action, arg, ev) {
     const s = Store.state;
     switch (action) {
@@ -681,38 +724,13 @@ const App = (() => {
         const idea = (s.aiIdeas || []).find((i) => i.sym === arg);
         if (!idea || idea.res.verdict === "wait") { h.toast("error", "Идея устарела — подождите пересчёта"); break; }
         if (!Store.canTrade()) { h.toast("error", "Сделки может открывать только аккаунт David или Yura"); break; }
-        // не догонять поезд: цена ушла от расчёта больше чем на 60% риска.
-        // R40: вместо тупика «дождитесь пересчёта» — свежий пересчёт ансамбля по
-        // живым 15м-свечам прямо здесь: подтверждает направление — открываем по
-        // свежим уровням; «wait» или снова дрейф — честно объясняем и ждём сервер.
-        const curIdea = (s.prices[idea.sym] && s.prices[idea.sym].price) || idea.res.price;
-        const driftIdea = Math.abs(curIdea - idea.res.price) / idea.res.price * 100;
-        let useRes = idea.res;
-        if (driftIdea > (idea.res.riskPct || 1) * 0.6) {
-          const barsIdea = Store.getBars(idea.sym, "15м");
-          if (!barsIdea || barsIdea.length < 60) {
-            Store.ensureBars(idea.sym, "15м");
-            h.toast("info", `Собираю свежие свечи ${idea.sym}…`, "Нажмите «Открыть в демо» ещё раз через пару секунд — идея будет пересчитана по живым данным");
-            break;
-          }
-          const extraIdea = {
-            whale: null,
-            onchain: (window.WhalesDB && WhalesDB.bias) ? WhalesDB.bias(idea.sym) : null,
-            glm: (window.GLM && GLM.factor) ? GLM.factor(idea.sym) : null,
-          };
-          const fresh = Engine.aiAnalyze(idea.sym, barsIdea, s.aiBrain, (s.news && s.news.items) || [], extraIdea);
-          const freshDrift = fresh && fresh.price ? Math.abs(curIdea - fresh.price) / fresh.price * 100 : Infinity;
-          if (!fresh || fresh.verdict === "wait" || freshDrift > (fresh.riskPct || 1) * 0.6) {
-            h.toast("info", "Цена ушла от расчёта", `${idea.sym}: идея строилась по ${Fmt.fmtPrice(idea.res.price)}, сейчас ${Fmt.fmtPrice(curIdea)} — свежий пересчёт вход не подтверждает, сервер обновит идею на закрытии 15м-свечи`);
-            break;
-          }
-          useRes = fresh;
-        }
-        const szSc = Store.aiSizeCalc();
-        if (szSc.size <= 0) { h.toast("error", "Размер не проходит по лимитам", `${szSc.why} — поднимите лимиты или пополните счёт`); break; }
-        const ideaOut = Store.placeDemo({ sym: idea.sym, side: useRes.verdict, size: szSc.size, lev: 1, stop: useRes.stop, target: useRes.target, strategy: "ai", ai: { confidence: useRes.confidence, note: useRes.note, factors: useRes.factors, score: useRes.score } });
-        if (!ideaOut.ok) { h.toast("error", ideaOut.error); break; }
-        h.toast("success", `Идея ИИ взята: ${idea.sym} ${useRes.verdict}`, `${Fmt.fmtNum(szSc.size)} ХРЮ · уверенность ${useRes.confidence}%${useRes !== idea.res ? " · по свежему пересчёту" : ""}`);
+        // R45: вход одним касанием — обработчик сам дожидается докачки свечей.
+        // Защита от двойного клика: пока идёт сценарий, повторный клик только информирует.
+        if (s._ideaBusy === arg) { h.toast("info", `Уже собираю свечи ${arg}…`, "вход выполнится автоматически — повторять не нужно"); break; }
+        s._ideaBusy = arg;
+        Promise.resolve(openIdeaFlow(idea))
+          .catch(() => h.toast("error", "Не получилось открыть идею", "проверьте сеть и попробуйте ещё раз"))
+          .finally(() => { if (s._ideaBusy === arg) delete s._ideaBusy; });
         break;
       }
 
@@ -720,6 +738,13 @@ const App = (() => {
       case "sig:take": {
         if (!Store.canTrade()) { h.toast("error", "Сделки может открывать только аккаунт David или Yura"); break; }
         const sym = arg;
+        // R45: берём только актуальные сигналы — из текущего списка и не старше 2 часов
+        const sigRow = (s.signals || []).find((x) => x.sym === sym);
+        const sigAgeMs = sigRow ? Date.now() - (sigRow.ts || 0) : Infinity;
+        if (!sigRow || sigAgeMs > 2 * 3600e3) {
+          h.toast("error", "Сигнал уже не актуален", sigRow ? `сигналу ${Math.round(sigAgeMs / 60000)} мин — рынок уехал, возьмите свежий из списка` : "стратегии обновили список — берите сигнал из актуальных во вкладке «Сигналы»");
+          break;
+        }
         // размер сигнала — 500 ХРЮ, но не выше лимитов счёта (одна сделка / суммарный)
         const sigSize = Math.min(500, Store.aiDealCap(), Math.round(Store.aiTotalRemain()), Math.round(s.balance));
         if (sigSize < 10) { h.toast("error", "Сделка не влезает в лимиты", Store.aiTotalRemain() < 10 ? "суммарный лимит исчерпан — закройте часть сделок" : s.balance < 10 ? "пополните демо-счёт в кабинете" : `лимит одной сделки — ${Fmt.fmtNum(Store.aiDealCap())} ХРЮ`); break; }

@@ -23,6 +23,7 @@ const Views = (() => {
     const btcChg = (prices.BTC && prices.BTC.chg24h) || 0;
     const equity = Store.totalEquity();
     const demoPnl = equity - s.startBalance;
+    const lockedSum = (s.userPositions || []).reduce((t, p) => t + (p.size || 0), 0); // R44: маржа в позициях
 
     // лидеры топ-5
     const leaders = [...labAccounts]
@@ -101,7 +102,7 @@ const Views = (() => {
 
       <div class="stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr))">
         ${h.statCard("Демо-счёт (ХРЮ)", `${Fmt.fmtNum(equity)} ХРЮ ≈ ${Fmt.fmtUsd(equity)}`, demoPnl >= 0 ? "text-gold" : "text-red",
-          `свободно ${Fmt.fmtNum(s.balance)} ХРЮ ≈ ${Fmt.fmtUsd(s.balance)} · PnL ${h.hruAmount(demoPnl, true)} (${Fmt.fmtUsdSigned(demoPnl)})`)}
+          `свободно ${Fmt.fmtNum(s.balance)} · в позициях ${Fmt.fmtNum(lockedSum)} (${(s.userPositions || []).length} шт.) · PnL ${h.hruAmount(demoPnl, true)} (${Fmt.fmtUsdSigned(demoPnl)})`)}
         ${h.statCard("Лаборатория · реализовано", h.hruAmount(realizedLab, true), "",
           `${labClosed.length} закрытых сделок · комиссия 0.1% учтена`)}
         ${h.statCard("Сигналов активно", s.signals.length, "",
@@ -249,11 +250,23 @@ const Views = (() => {
   function signals() {
     const s = S();
 
+    // R45: показываем ТОЛЬКО актуальное. Идея старше 45 мин (три закрытые 15м-свечи)
+    // уже не «лучшая идея рынка» — сканер её обновит или снят; сигнал стратегий
+    // старше 2 часов — не повод для входа по рынку. Устаревшее скрываем с счётчиком.
+    const nowTs = Date.now();
+    const IDEAS_TTL = 45 * 60000;
+    const SIGS_TTL = 2 * 3600000;
+    const ideasAll = s.aiIdeas || [];
+    const ideas = ideasAll.filter((i) => nowTs - (i.ts || 0) <= IDEAS_TTL);
+    const staleIdeas = ideasAll.length - ideas.length;
+    const sigsAll = s.signals || [];
+    const sigsFresh = sigsAll.filter((x) => nowTs - (x.ts || 0) <= SIGS_TTL);
+    const staleSigs = sigsAll.length - sigsFresh.length;
+
     // ИИ-сканер: лучшие идеи по всем монетам (автопилот пересчитывает на каждом обновлении свечей)
-    const ideas = s.aiIdeas || [];
     const scanner = ideas.length === 0
-      ? `<div class="empty">ИИ сканирует 24 монеты — первые идеи появятся в течение минуты</div>`
-      : `<div class="rows row-divide">` + ideas.slice(0, 6).map((i) => {
+      ? `<div class="empty">${ideasAll.length ? "Свежих идей сейчас нет — сканер обновит подбор на ближайшей закрытой 15-минутной свече" : "ИИ сканирует 24 монеты — первые идеи появятся в течение минуты"}</div>`
+      : `${staleIdeas > 0 ? `<div class="empty" style="padding:8px 12px;font-size:12px;color:#71717a">${staleIdeas} ${staleIdeas === 1 ? "устаревшая идея скрыта" : "устаревших идеи скрыто"} · покажем только свежие</div>` : ""}<div class="rows row-divide">` + ideas.slice(0, 6).map((i) => {
           const price = (s.prices[i.sym] && s.prices[i.sym].price) || i.res.price;
           const moved = ((price / i.res.price - 1) * 100) || 0;
           return `<div class="sig-row">
@@ -264,6 +277,7 @@ const Views = (() => {
                 ${h.tag(i.res.verdict === "лонг" ? "green" : "red", i.res.verdict)}
                 ${h.tag("blue", `уверенность ${i.res.confidence}%`)}
                 ${!i.guard.ok ? h.tag("orange", "защита: " + i.guard.why) : ""}
+                <span class="sig-time num">${ago(i.ts)} назад</span>
               </div>
               <div class="sig-note num">стоп ${fmtPrice(i.res.stop)} · цель ${fmtPrice(i.res.target)} · ${h.esc(i.res.note)}</div>
               ${(() => {
@@ -285,12 +299,12 @@ const Views = (() => {
           </div>`;
         }).join("") + `</div>`;
 
-    const rows = s.signals.length === 0
+    const rows = sigsFresh.length === 0
       ? `<section class="card card-pad" style="text-align:center;padding:40px">
-          <div style="font-size:14px;color:#a1a1aa">Сигналы стратегий формируются на закрытиях 15-минутных свечей</div>
+          <div style="font-size:14px;color:#a1a1aa">${sigsAll.length ? "Актуальных сигналов нет — старше 2 часов не показываем" : "Сигналы стратегий формируются на закрытиях 15-минутных свечей"}</div>
           <div style="margin-top:4px;font-size:12.5px;color:#52525b">Как только стратегия увидит пробой — сигнал появится здесь автоматически</div>
         </section>`
-      : `<section class="card"><div class="rows row-divide">` + s.signals.slice(0, 14).map((sig) => {
+      : `<section class="card">${staleSigs > 0 ? `<div class="empty" style="padding:8px 12px;font-size:12px;color:#71717a">${staleSigs} ${staleSigs === 1 ? "устаревший сигнал скрыт" : "устаревших сигналов скрыто"} · вошли бы в рынок по цене, которой уже нет</div>` : ""}<div class="rows row-divide">` + sigsFresh.slice(0, 14).map((sig) => {
           const strat = Engine.STRATEGIES.find((x) => x.id === sig.strategy);
           const price = (s.prices[sig.sym] && s.prices[sig.sym].price) || sig.entry;
           const moved = ((price / sig.entry - 1) * 100) || 0;
@@ -802,6 +816,26 @@ const Views = (() => {
           "движение против сделки у верных отказов")}
       </div>`;
 
+    // R45: доверие по монетам — исходы отказов уже влияют на ИИ; показываем кто в плюсе/минусе
+    const trustMap = sh.trust || {};
+    const skipMap = sh.skip || {};
+    const nowTrust = Date.now();
+    const trustRows = Object.keys(trustMap).map((sym) => ({ sym, ...(trustMap[sym] || {}) }))
+      .filter((t) => ((t.right || 0) + (t.wrong || 0) + (t.flat || 0)) > 0)
+      .sort((x, y) => Math.abs(y.adj || 0) - Math.abs(x.adj || 0) || ((y.ts || 0) - (x.ts || 0)))
+      .slice(0, 8)
+      .map((t) => {
+        const n = (t.right || 0) + (t.wrong || 0) + (t.flat || 0);
+        const skipLeftH = skipMap[t.sym] ? Math.max(0, Math.round((skipMap[t.sym] - nowTrust) / 3600000)) : 0;
+        const adj = Number(t.adj) || 0;
+        const adjTxt = adj === 0 ? "±0" : `${adj > 0 ? "+" : ""}${adj}`;
+        const adjCls = adj > 0 ? "color:#4ade80" : adj < 0 ? "color:#f87171" : "color:#71717a";
+        return `<div style="display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:13px">
+          <span style="color:#d4d4d8"><b>${h.esc(t.sym)}</b> · разобрано ${n}: ${t.right || 0} верных / ${t.wrong || 0} упущено${t.flat ? ` / ${t.flat} мимо` : ""}${skipLeftH ? ` · <span style="color:#fbbf24">вне скана ИИ ещё ${skipLeftH} ч</span>` : ""}</span>
+          <span class="num" style="white-space:nowrap;${adjCls}">${adjTxt} к уверенности</span>
+        </div>`;
+      }).join("");
+
     const html = `
     <div class="stack">
       <div class="page-head">
@@ -819,6 +853,19 @@ const Views = (() => {
             bear ? `<b style="color:#fbbf24">Медвежий режим включён</b> — порог входа +6%: в падении торгуем только отборное, почти всё остальное идёт в отказ (и проверяется фактом ниже).` :
             `<b style="color:#4ade80">Обычный режим</b> — базовый порог входа. Как только BTC уйдёт глубже −3% за 24ч (или ≥70% вотчлиста в красе), порог поднимется, а отказы начнут копиться здесь.`}
         </div>
+      </section>
+      <section class="card" style="padding:14px">
+        <div class="notify-sec">Влияние на ИИ · журнал учит сигналы и подбор монет</div>
+        <div style="font-size:13px;color:#d4d4d8;line-height:1.5">
+          Тень обучает ИИ по трём каналам. <b>1. Порог входа:</b> отказы с кодом «порог», признанные фактом ошибочными (монета ушла бы в плюс), каждые 2 ошибки снижают порог на 1% (пол 72, не чаще раза в час). <b>2. Доверие по монете:</b> исходы отказов копят репутацию каждой монеты — где фильтр ошибочно резал плюсовые входы, уверенность подрастает (до +4), где отказы стабильно верны — падает (до −6), и это влияет и на вход, и на место монеты в «лучших идеях». <b>3. Пропуск мусорных монет:</b> монету с тремя и более верными отказами подряд ИИ снимает со скана на 12 часов — слоты идей не занимают заведомо плохие. Всё это пишется в уроки ИИ и видимо всем устройствам.
+        </div>
+        ${(sh.tune || []).length ? `<div style="margin-top:10px">${sh.tune.slice(0, 5).map((t) => `<div style="display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:13px">
+          <span style="color:#d4d4d8">${Fmt.fmtTimeAgo(Math.max(0, Math.round((Date.now() - (t.ts || 0)) / 60000)))} назад · ${h.esc(t.why || "подстройка порога")}</span>
+          <span class="num" style="white-space:nowrap;color:#4ade80">порог ${t.from}% → ${t.to}%</span>
+        </div>`).join("")}</div>` :
+        `<div style="margin-top:10px;color:#71717a;font-size:13px">Подстроек порога пока не было: либо ошибочных отказов по порогу ещё не набралось двух, либо порог уже у пола 72%. Это нормально — в здоровом фильтре большинство отказов верные.</div>`}
+        <div style="margin-top:14px" class="notify-sec">Доверие по монетам · исходы отказов меняют выбор монет</div>
+        ${trustRows || `<div style="margin-top:8px;color:#71717a;font-size:13px">Пока нет разобранных отказов по монетам: каждому отказу нужно 8 часов на проверку фактом. Как только исходы наберутся, здесь появится список — монеты с плюсом ИИ будет искать активнее, с минусом — сознательно избегать.</div>`}
       </section>
       <section class="card" style="padding:14px">
         <div class="notify-sec">Журнал отказов · что было бы, если бы вошли</div>
