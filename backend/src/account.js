@@ -347,11 +347,10 @@ export function mergeNtfy(aN, bN) {
 }
 
 
-// R43: «ТЕНЕВАЯ ТОРГОВЛЯ» (по мотивам поста Sova/Таповича t.me/tapovich_gram/7512):
-// журнал отказов ИИ — кандидат был, вход не состоялся (порог/фильтр/лимит/пауза).
-// Через горизонт часов каждый отказ проверяется по факту: отказ ПРАВИЛЬНЫЙ (монета
-// пошла бы в минус) или ПРОПУСТИЛИ профит. Тапович: 49 из 50 отказов верны —
-// после отказа монеты упали на 10–30%. Теперь наша платформа считает то же самое.
+// R43: «ТЕНЕВАЯ ТОРГОВЛЯ» — журнал отказов ИИ: кандидат был, вход не состоялся
+// (порог/фильтр/лимит/пауза). Через горизонт часов каждый отказ проверяется по
+// факту: отказ ПРАВИЛЬНЫЙ (монета пошла бы в минус) или ПРОПУСТИЛИ профит.
+// Так платформа сама проверяет строгость своих фильтров.
 export const SHADOW_HORIZON_MS = 8 * 3600e3; // горизонт оценки отказа — 8 часов
 const SHADOW_MAX = 60;                       // сколько записей храним в архиве
 const SHADOW_GAP_MS = 3 * 3600e3;            // антидубль: одна запись sym+side раз в 3 часа
@@ -777,12 +776,16 @@ export class AccountBrain {
   // PnL и события — всё в USDT; баланс демо-счёта (ХРЮ) не трогается вовсе.
   isLive() { return this.a.mode === "live"; }
   cur() { return this.isLive() ? "USDT" : "ХРЮ"; }
-  // база для лимитов нагрузки: демо — баланс ХРЮ, live — реальные USDT (баланс биржи + вложенное в позиции)
+  // база для лимитов нагрузки и суммарного лимита: ВСЕ деньги счёта — свободные +
+  // вложенные в позиции (маржа уже списана с баланса при открытии). Единообразно для
+  // демо (ХРЮ) и live (реальные USDT с биржи). R54: раньше демо считало только
+  // свободный остаток — после уменьшения баланса лимиты «взрывались» и блокировали всё.
   tradeBase() {
-    if (!this.isLive()) return this.a.balance;
+    if (!this.isLive()) return this.a.balance + this.openPositionsSum();
     const ox = this.a.okx || {};
     let v = Number.isFinite(ox.balanceUSDT) ? ox.balanceUSDT : 0;
     for (const p of this.a.userPositions) if (p.live && p.live.qty) v += p.size || 0; // уже потрачено на токены
+    for (const j of this.a.realQueue || []) if (j.kind === "buy") v += j.usdt || 0; // R54: заявка в очереди — деньги уже вложены (иначе числитель/знаменатель расходятся)
     return v;
   }
   // свободные USDT под НОВУЮ сделку: баланс биржи минус то, что ещё не учтено синком
@@ -814,8 +817,12 @@ export class AccountBrain {
   // ---------- лимиты и гварды (порт store.js) ----------
   aiDealCap() { const v = Number(this.a.maxDeal); return Number.isFinite(v) ? Math.max(5, Math.min(100000, Math.round(v))) : 1000; }
   aiTotalCap() {
+    // R54: суммарный лимит не бывает больше РЕАЛЬНЫХ денег счёта (свободные + вложенные).
+    // Выставил баланс 100 ХРЮ — суммарный вход не превысит 100 ХРЮ, что бы ни было в
+    // настройках: сделки адаптируются под текущий баланс автоматически.
     const v = Number(this.a.maxTotal), d = this.aiDealCap();
-    return Number.isFinite(v) ? Math.max(d, Math.min(1000000, Math.round(v))) : Math.max(d, 5000);
+    const setting = Number.isFinite(v) ? Math.max(d, Math.min(1000000, Math.round(v))) : Math.max(d, 5000);
+    return Math.max(0, Math.min(setting, Math.ceil(this.tradeBase())));
   }
   openPositionsSum() { return this.a.userPositions.reduce((s, p) => s + (p.size || 0), 0); }
   aiTotalRemain() { return Math.max(0, this.aiTotalCap() - this.openPositionsSum()); }
@@ -1649,12 +1656,12 @@ export class AccountBrain {
     if (!this.okxSyncActive()) {
       return { ok: false, error: "Реальные сделки исполняются только при подключённом OKX и включённых авто-ордерах: подключите ключи в модалке реального рынка (полная синхронизация)." };
     }
-    if (margin > this.aiDealCap()) return { ok: false, error: `Лимит одной сделки — ${Fmt.fmtNum(this.aiDealCap())} USDT` };
     if (margin < 5) return { ok: false, error: "Минимум сделки на реальном рынке — 5 USDT (минимум ордера OKX)" };
+    const avail0 = this.liveAvailableUsdt();
+    if (avail0 == null) return { ok: false, error: "Баланс OKX ещё не синхронизирован — подождите минуту или нажмите «Обновить баланс»" }; // R54: проверка данных РАНЬШЕ лимитов (лимиты считаются от баланса)
+    if (margin > this.aiDealCap()) return { ok: false, error: `Лимит одной сделки — ${Fmt.fmtNum(this.aiDealCap())} USDT` };
     if (this.openPositionsSum() + margin > this.aiTotalCap()) return { ok: false, error: `Суммарный лимит сделок — ${Fmt.fmtNum(this.aiTotalCap())} USDT: в рынке уже ${Fmt.fmtNum(Math.round(this.openPositionsSum()))} USDT` };
-    const avail = this.liveAvailableUsdt();
-    if (avail == null) return { ok: false, error: "Баланс OKX ещё не синхронизирован — подождите минуту или нажмите «Обновить баланс»" };
-    if (margin > avail) return { ok: false, error: `Недостаточно свободных USDT на бирже: доступно ${Fmt.fmtNum(avail, 2)} USDT` };
+    if (margin > avail0) return { ok: false, error: `Недостаточно свободных USDT на бирже: доступно ${Fmt.fmtNum(avail0, 2)} USDT` };
     const risk = price * 0.02;
     const pos = {
       id: p.id || `u${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
@@ -2303,6 +2310,15 @@ export class AccountBrain {
         if (!Number.isFinite(v) || v < 0) return { ok: false, error: "Некорректный баланс" };
         a.balance = v; a.startBalance = v;
         if (a.aiAuto && a.aiSession) a.aiSession.startEquity = this.totalEquity();
+        // R54: событие-след установки баланса + честное объяснение адаптации лимитов
+        const inMkt = Math.round(this.openPositionsSum());
+        this.pushEvent({
+          tone: "neutral",
+          title: `Баланс установлен: ${Fmt.fmtNum(v)} ХРЮ`,
+          detail: inMkt > 0
+            ? `в рынке уже ${Fmt.fmtNum(inMkt)} ХРЮ, открыты при прежнем балансе — закроются по стопу/цели как обычно · новые входы (ручные, сигнальные, автопилот) встанут только на свободные ${Fmt.fmtNum(v)} ХРЮ и больше свободных денег не займут`
+            : `все входы — ручные, сигнальные и автопилот — считаются от этого баланса: разовые сделки и суммарная нагрузка не превысят ${Fmt.fmtNum(v)} ХРЮ`,
+        });
         return { ok: true };
       }
       case "resetDemo": {

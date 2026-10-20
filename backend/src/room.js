@@ -26,7 +26,7 @@ const NEWS_MS = 10 * 60000;      // новостная лента раз в 10 �
 const SCAN_PER_TICK = 8;         // монет в скане за тик (ротация по кругу ≈ каждые 6-7 мин на монету)
 const HUB_LOGIN = "__hub";       // R47: имя DO-хранилища ЕДИНОГО мозга ИИ (не аккаунт)
 const HUB_SYNC_MS = 4 * 60000;   // синхронизация с общим мозгом не чаще раза в 4 минуты
-export const BUILD = "r53";
+export const BUILD = "r54";
 
 const PASSWORDS = { david: "ETH123aAgo", yura: "BTCmyB671" };
 

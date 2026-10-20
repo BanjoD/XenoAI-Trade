@@ -43,7 +43,7 @@ const Store = (() => {
     mode: "demo",       // demo | live (реальный рынок)
     aiAuto: true,       // ИИ-автопилот: сам заходит в монеты и флипает, спот-only
     aiIdeas: [],        // сканер ИИ: лучшие идеи по всем монетам
-    // R43 «Теневая торговля»: журнал отказов ИИ и их проверка временем (по мотивам поста Sova)
+    // R43 «Теневая торговля»: журнал отказов ИИ и их проверка фактом через 8 часов
     shadow: { list: [], stats: { right: 0, wrong: 0, flat: 0, avoidedSum: 0, avoidedN: 0, since: 0 } },
     liveOrders: [],     // отправленные реальные ордера (заготовка реальной торговли)
     liveStats: { n: 0, wins: 0, losses: 0, pnlUsdt: 0, since: 0 }, // R49: итог обучения ИИ на реальных сделках (считает сервер)
@@ -1702,7 +1702,15 @@ const Store = (() => {
     state.balance = v; state.startBalance = v;
     // ввод/вывод не должен считаться результатом сессии ИИ — перебазируем
     if (state.aiAuto && state.aiSession) state.aiSession.startEquity = totalEquity();
-    pushEvent({ tone: "neutral", title: `Баланс демо-счёта установлен: ${Fmt.fmtNum(v)} ХРЮ`, detail: "Кабинет пользователя" });
+    // R54: честно объясняем, как лимиты подстраиваются под новый баланс
+    const inMkt = Math.round(openPositionsSum());
+    pushEvent({
+      tone: "neutral",
+      title: `Баланс установлен: ${Fmt.fmtNum(v)} ХРЮ`,
+      detail: inMkt > 0
+        ? `в рынке уже ${Fmt.fmtNum(inMkt)} ХРЮ, открыты при прежнем балансе — закроются по стопу/цели как обычно · новые входы встанут только на свободные ${Fmt.fmtNum(v)} ХРЮ и больше свободных денег не займут`
+        : "все входы — ручные, сигнальные и автопилот — считаются от этого баланса: разовые сделки и суммарная нагрузка не превысят его",
+    });
     persist(); emit();
   }
 
@@ -1766,7 +1774,7 @@ const Store = (() => {
   }
 
   // ---------- ИИ-автопилот (спот-only) ----------
-  // Тапович: спот без фьючерсов; ИИ заходит в любые монеты с потенциалом, мощная защита
+  // Спот без фьючерсов: ИИ заходит в любые монеты с потенциалом, мощная защита
   // от скама, флипает когда сам посчитает нужным, ультра-быстрые выходы.
   // Авто-стоп сессии: +лимит% профита или −лимит% просадки → автопилот закрывает ВСЕ ИИ-сделки
   // и выключается, ждёт возобновления. Лимит настраивается (по умолчанию 50%).
@@ -1791,10 +1799,23 @@ const Store = (() => {
     const v = Number(state.maxDeal);
     return Number.isFinite(v) ? Math.max(5, Math.min(100000, Math.round(v))) : 1000;
   }
-  function aiTotalCap() {    // максимум суммы всех сделок (кламп: не меньше лимита одной)
+  function aiTotalCap() {    // максимум суммы всех сделок: настройка, но не больше реальных денег счёта
+    // R54: суммарный лимит не бывает больше ВСЕХ денег счёта (свободные + вложенные в
+    // позиции). Выставил баланс 100 ХРЮ — суммарный вход не превысит 100 ХРЮ: сделки
+    // адаптируются под текущий баланс автоматически, что бы ни было в настройках.
     const v = Number(state.maxTotal);
     const d = aiDealCap();
-    return Number.isFinite(v) ? Math.max(d, Math.min(1000000, Math.round(v))) : Math.max(d, 5000);
+    const setting = Number.isFinite(v) ? Math.max(d, Math.min(1000000, Math.round(v))) : Math.max(d, 5000);
+    return Math.max(0, Math.min(setting, Math.ceil(totalMoney())));
+  }
+  function totalMoney() {    // R54: все деньги счёта — свободные + вложенные в позиции (маржа уже списана)
+    if (state.mode === "live") {
+      let v = state.okx && Number.isFinite(state.okx.balanceUSDT) ? state.okx.balanceUSDT : 0;
+      for (const p of state.userPositions) if (p.live && p.live.qty) v += p.size || 0;
+      for (const j of (Array.isArray(state.realQueue) ? state.realQueue : [])) if (j.kind === "buy") v += j.usdt || 0; // заявка в очереди — деньги уже вложены
+      return v;
+    }
+    return state.balance + openPositionsSum();
   }
   function openPositionsSum() { // суммарная маржа всех открытых сделок счёта
     return state.userPositions.reduce((a, p) => a + (p.size || 0), 0);
@@ -1964,16 +1985,13 @@ const Store = (() => {
     return { ok: true, why: "ок" };
   }
 
-  // перегрев портфеля: больше 60% баланса в позициях — новых входов нет
+  // перегрев портфеля: больше 60% ВСЕХ денег счёта в позициях — новых входов нет
   function heatGuard() {
-    // R52: в live база — реальные USDT (баланс биржи + вложенное в позиции)
-    let bal = state.balance;
-    if (state.mode === "live") {
-      bal = state.okx && Number.isFinite(state.okx.balanceUSDT) ? state.okx.balanceUSDT : 0;
-      for (const p of state.userPositions) if (p.live && p.live.qty) bal += p.size || 0;
-    }
+    // R54: база — все деньги (свободные + вложенные), единообразно демо и live:
+    // перегрев = доля денег, сидящая в позициях, а не доля свободного остатка
+    const bal = totalMoney();
     const inMarket = openPositionsSum();
-    if (bal > 0 && inMarket / bal > 0.6) return { ok: false, why: `портфель перегрет: ${Math.round((inMarket / bal) * 100)}% баланса в позициях` };
+    if (bal > 0 && inMarket / bal > 0.6) return { ok: false, why: `портфель перегрет: ${Math.round((inMarket / bal) * 100)}% денег в позициях` };
     return { ok: true, why: "ок" };
   }
 
